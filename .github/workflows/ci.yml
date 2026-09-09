@@ -13,7 +13,7 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            node: '22.13.0'
+            node: '22.16.0'
           - os: ubuntu-latest
             node: '24'
           - os: macos-latest
@@ -23,27 +23,19 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ matrix.node }}
       - run: npm run check
       - run: npm test
-      - name: Install pinned upstream (no lifecycle scripts)
+      - name: Install locked upstream (no lifecycle scripts)
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run test:upstream
+      - name: Verify published file set includes the dependency lock
         shell: bash
         run: |
-          if [ -f package-lock.json ]; then
-            npm ci --ignore-scripts --no-audit --no-fund
-          else
-            npm install --ignore-scripts --no-audit --no-fund
-          fi
-      - run: npm run test:upstream
-      - run: npm pack --dry-run --ignore-scripts
-      - name: Record resolved dependency lock for review
-        if: always() && matrix.os == 'ubuntu-latest' && matrix.node == '22.13.0'
-        uses: actions/upload-artifact@v4
-        with:
-          name: dependency-lock
-          path: package-lock.json
-          if-no-files-found: warn
-          retention-days: 7
+          npm pack --dry-run --ignore-scripts --json > pack-manifest.json
+          node --input-type=module -e "import fs from 'node:fs'; import assert from 'node:assert/strict'; const files = JSON.parse(fs.readFileSync('pack-manifest.json'))[0].files.map(f => f.path); for (const p of ['bin/zcode-codeg.js', 'src/launcher.js', 'npm-shrinkwrap.json']) assert.ok(files.includes(p), p);"

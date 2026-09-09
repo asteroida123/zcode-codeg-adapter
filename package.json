@@ -17,10 +17,11 @@
     "docs",
     "examples",
     "LICENSE",
-    "NOTICE"
+    "NOTICE",
+    "npm-shrinkwrap.json"
   ],
   "engines": {
-    "node": ">=22.13.0"
+    "node": "^22.16.0 || ^24.0.0"
   },
   "scripts": {
     "check": "node --check bin/zcode-codeg.js && node --check src/launcher.js",

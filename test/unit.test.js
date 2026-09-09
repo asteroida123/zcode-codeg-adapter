@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { once } from 'node:events'
 import test from 'node:test'
-import { assertNode, codegEnvironment, manifest, parseArgs, upstreamVersion } from '../src/launcher.js'
+import { assertLocalConfig, assertNode, codegEnvironment, manifest, parseArgs, upstreamVersion } from '../src/launcher.js'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 
@@ -31,7 +31,8 @@ function fixture(t, { source = 'export async function main() { process.stdin.pip
     run(args = [], extra = {}) {
       const result = spawnSync(process.execPath, [entry, ...args], {
         cwd: dir, encoding: 'utf8', timeout: 5000,
-        env: { ...process.env, NODE_OPTIONS: '', NODE_PATH: '' }, ...extra,
+        ...extra,
+        env: { ...process.env, ...extra.env, NODE_OPTIONS: '', NODE_PATH: '', HOME: dir, USERPROFILE: dir, XDG_CONFIG_HOME: dir },
       })
       assert.ifError(result.error)
       return result
@@ -53,10 +54,10 @@ test('CLI rejects unknown or extra arguments without echoing them', () => {
 })
 
 test('Node floor and real Node runtime are enforced', () => {
-  for (const node of ['20.19.0', '22.12.0', 'bad', '22.13.0-pre']) {
+  for (const node of ['20.19.0', '22.15.0', '23.5.0', '26.0.0', 'bad', '22.16.0-pre']) {
     assert.throws(() => assertNode({ node }), { code: 'E_NODE' })
   }
-  for (const node of ['22.13.0', '22.16.0', '24.0.0']) assert.doesNotThrow(() => assertNode({ node }))
+  for (const node of ['22.16.0', '22.23.0', '24.0.0']) assert.doesNotThrow(() => assertNode({ node }))
   assert.throws(() => assertNode({ node: '24.0.0', bun: '1.4.0' }), { code: 'E_NODE' })
 })
 
@@ -153,7 +154,7 @@ test('environment is set before import; main runs once in the same process and c
   assert.equal(output.sandbox, '1')
   assert.equal(output.calls, 1)
   assert.equal(output.pid, result.pid)
-  assert.equal(output.cwd, app.dir)
+  assert.equal(realpathSync(output.cwd), realpathSync(app.dir))
 })
 
 test('wrapper does not parse or rewrite stdio bytes (mock echo server)', (t) => {
@@ -204,4 +205,48 @@ test('SIGTERM reaches upstream directly (mock lifecycle, POSIX)', { skip: proces
   const [code, signal] = await closed
   assert.equal(code, 0)
   assert.equal(signal, null)
+})
+
+for (const [name, data, expected] of [
+  ['absent remote', {}, undefined],
+  ['remote disabled', { remote: { enabled: false, token: 'TEST_SECRET' } }, undefined],
+  ['remote enabled', { remote: { enabled: true, token: 'TEST_SECRET' } }, 'E_REMOTE_CONFIG'],
+  ['ambiguous remote enabled', { remote: { enabled: 'true' } }, 'E_REMOTE_CONFIG'],
+  ['invalid root', [], 'E_CONFIG'],
+  ['invalid remote section', { remote: null }, 'E_CONFIG'],
+]) {
+  test(`disk config guard: ${name}`, (t) => {
+    const app = fixture(t)
+    const folder = join(app.dir, 'zcode-acp')
+    mkdirSync(folder)
+    const file = join(folder, 'config.json')
+    const raw = JSON.stringify(data)
+    writeFileSync(file, raw)
+    const check = () => assertLocalConfig({ XDG_CONFIG_HOME: app.dir })
+    if (expected) assert.throws(check, { code: expected })
+    else assert.doesNotThrow(check)
+    assert.equal(readFileSync(file, 'utf8'), raw)
+  })
+}
+
+test('enabled disk config blocks startup before importing upstream, without token output', (t) => {
+  const app = fixture(t, { source: 'console.log("SHOULD_NOT_IMPORT")' })
+  mkdirSync(join(app.dir, 'zcode-acp'))
+  writeFileSync(join(app.dir, 'zcode-acp/config.json'), JSON.stringify({ remote: { enabled: true, token: 'TEST_SECRET' } }))
+  const result = app.run()
+  assert.equal(result.status, 1)
+  assert.equal(result.stdout, '')
+  assert.match(result.stderr, /E_REMOTE_CONFIG/)
+  assert.doesNotMatch(result.stderr, /TEST_SECRET/)
+})
+
+test('malformed config is rejected without dumping its contents', (t) => {
+  const app = fixture(t)
+  mkdirSync(join(app.dir, 'zcode-acp'))
+  writeFileSync(join(app.dir, 'zcode-acp/config.json'), 'bad TEST_SECRET')
+  const result = app.run()
+  assert.equal(result.status, 1)
+  assert.equal(result.stdout, '')
+  assert.match(result.stderr, /E_CONFIG/)
+  assert.doesNotMatch(result.stderr, /TEST_SECRET/)
 })

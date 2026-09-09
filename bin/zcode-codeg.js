@@ -26,7 +26,7 @@ try {
         adapterVersion: manifest.version,
         nodeVersion: process.versions.node,
         upstream: `${upstream.name}@${upstream.version}`,
-        checks: ['node', 'node:sqlite', 'upstream-manifest', 'upstream-entry-resolution'],
+        checks: ['node', 'node:sqlite', 'remote-config', 'upstream-manifest', 'upstream-entry-resolution'],
         zcodeInstallation: 'not-checked',
         authentication: 'not-checked',
         acpHandshake: 'not-checked',

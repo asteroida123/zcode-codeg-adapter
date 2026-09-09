@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdtempSync, mkdirSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -17,6 +17,10 @@ for (const shutdown of ['eof', ...(process.platform === 'win32' ? [] : ['sigterm
     const home = mkdtempSync(join(tmpdir(), 'zcode-acp-smoke-'))
     const cwd = join(home, 'workspace with spaces')
     mkdirSync(cwd)
+    mkdirSync(join(home, 'zcode-acp'))
+    writeFileSync(join(home, 'zcode-acp/config.json'), JSON.stringify({
+      remote: { enabled: false, token: 'test-file-token-not-real' },
+    }))
     // Do not inherit provider credentials, NODE_OPTIONS or the user's ZCode state.
     const env = {}
     for (const key of ['PATH', 'Path', 'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT', 'TMP', 'TEMP', 'TMPDIR']) {
