@@ -28,7 +28,7 @@ const SYMBOLS = new Map([
   ['ECONNREFUSED', 'network'], ['ENOTFOUND', 'network'], ['ETIMEDOUT', 'network'],
 ])
 const PATTERNS = [
-  ['model-configuration', /\b(?:no|missing|unknown|unconfigured) (?:default )?(?:model|provider)\b|\b(?:model|provider) (?:is )?(?:not (?:found|configured|set)|missing)\b|\bmodel\.main\b/i],
+  ['model-configuration', /\b(?:no|missing|unknown|unconfigured) (?:default )?(?:model|provider)\b|\b(?:model|provider)(?: config(?:uration)?)? (?:is )?(?:not (?:found|configured|set)|missing)\b|\bmodel\.main\b/i],
   ['authentication', /\b(?:authentication (?:required|failed)|not (?:logged|signed) in|invalid (?:api key|token)|(?:missing|expired|invalid) credentials?|credential(?:s)? (?:not found|missing|expired)|api key (?:is )?(?:missing|required|invalid))\b/i],
   ['filesystem-access', /\b(?:EACCES|EPERM|permission denied|operation not permitted)\b/i],
   ['file-missing', /\bENOENT\b|no such file or directory/i],
