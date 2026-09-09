@@ -1,6 +1,7 @@
 import { realpath } from 'node:fs/promises'
 import { PrivateRpc } from './rpc.mjs'
 import { ProbeError, object } from './errors.mjs'
+import { identityShape } from './turn-evidence.mjs'
 
 export const PROFILE = 'app-server-cli-0.16.5-candidate'
 export const EXPECTED_CLI = '0.16.5'
@@ -76,6 +77,7 @@ export class AppServerBackend {
     return new Promise((resolve, reject) => {
       const turn = { accepted: false, started: false, turnId: null, terminal: null, cancelSent: false,
         streams: 0, tools: 0, denied: 0, cancelOnStream, cancelTimeoutMs,
+        startCount: 0, firstStartIdentity: null,
         timer: null, cancelTimer: null, settled: false, finish: null }
       turn.finish = (error, result) => {
         if (turn.settled) return
@@ -115,7 +117,9 @@ export class AppServerBackend {
     // proven cancellation without an explicit backend cancellation reason.
     turn.finish(null, { streams: turn.streams, tools: turn.tools, denied: turn.denied,
       turnIdObserved: turn.turnId !== null, terminalIdMatched: turn.terminal.payload.turnId === turn.turnId && turn.turnId !== null, cancelSent: turn.cancelSent,
-      cancelled, terminalObserved: true })
+      cancelled, terminalObserved: true,
+      identityEvidence: { startCount: turn.startCount,
+        firstStart: turn.firstStartIdentity, terminal: identityShape(turn.terminal) } })
   }
 
   cancel(id) {
@@ -146,6 +150,8 @@ export class AppServerBackend {
       this.metrics.staleEvents++; return
     }
     if (params.type === 'turn.started') {
+      turn.startCount++
+      turn.firstStartIdentity ??= identityShape(params)
       turn.started = true
       turn.turnId = nativeId ?? null
     } else if (!turn.started) {

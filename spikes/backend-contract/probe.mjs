@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { AppServerBackend, PROFILE, EXPECTED_CLI } from './backend.mjs'
 import { ProbeError, diagnostic } from './errors.mjs'
 import { LocalErrorCapture } from './local-error.mjs'
+import { modelObservation } from './turn-evidence.mjs'
 const execute = promisify(execFile)
 const fake = fileURLToPath(new URL('../../test/fake-zcode.cjs', import.meta.url))
 const scenarios = ['inspect', 'session', 'smoke', 'deny', 'cancel', 'resume', 'all']
@@ -81,7 +82,7 @@ async function versionOf(entry, cwd, env) {
 export async function runProbe(input, { signal, onLocalErrorFile = () => {} } = {}) {
   const options = validateOptions({ ...input })
   const localError = options.localError ? new LocalErrorCapture() : null
-  const report = { schemaVersion: 1, diagnosticRevision: 3,
+  const report = { schemaVersion: 1, diagnosticRevision: 3, turnEvidenceRevision: 1,
     runtime: { node: process.versions.node, platform: process.platform, arch: process.arch }, profile: PROFILE, evidence: options.live ? 'live-observation' : 'synthetic',
     scenario: options.scenario, status: 'pass', productionReady: false, checks: [],
     cleanup: { workspaceRemoved: false, processesClosed: true },
@@ -159,11 +160,12 @@ export async function runProbe(input, { signal, onLocalErrorFile = () => {} } = 
           const after = await backend.inspect(id, marker)
           if (after.assistantMessages <= before.assistantMessages || !after.lastAssistantHasMarker) throw new ProbeError('E_HISTORY')
           const outcome = result.terminalIdMatched && continued.terminalIdMatched ? 'pass' : 'inconclusive'
-          report.checks.push({ name: scenario, outcome, observed: { historyRetained: true, secondTurnRetainedContext: true } })
+          report.checks.push({ name: scenario, outcome, observed: { historyRetained: true, secondTurnRetainedContext: true,
+            firstTurn: modelObservation(result, before), continuedTurn: modelObservation(continued, after) } })
           if (outcome === 'inconclusive') report.status = 'inconclusive'
         } else {
           const outcome = result.terminalIdMatched ? 'pass' : 'inconclusive'
-          report.checks.push({ name: scenario, outcome, observed: result })
+          report.checks.push({ name: scenario, outcome, observed: modelObservation(result, before) })
           if (outcome === 'inconclusive') report.status = 'inconclusive'
         }
       }
