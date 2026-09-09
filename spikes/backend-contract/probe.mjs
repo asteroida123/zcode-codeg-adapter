@@ -7,6 +7,7 @@ import { join, isAbsolute, extname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { AppServerBackend, PROFILE, EXPECTED_CLI } from './backend.mjs'
 import { ProbeError, diagnostic } from './errors.mjs'
+import { LocalErrorCapture } from './local-error.mjs'
 const execute = promisify(execFile)
 const fake = fileURLToPath(new URL('../../test/fake-zcode.cjs', import.meta.url))
 const scenarios = ['inspect', 'session', 'smoke', 'deny', 'cancel', 'resume', 'all']
@@ -22,6 +23,7 @@ export function parseArgs(argv) {
     else if (key === '--mock') options.mock = true
     else if (key === '--allow-model') options.allowModel = true
     else if (key === '--allow-file-test') options.allowFileTest = true
+    else if (key === '--local-error') options.localError = true
     else if (key === '--help') options.help = true
     else if (['--zcode', '--scenario', '--out'].includes(key)) {
       const value = argv[++i]
@@ -37,6 +39,8 @@ export function validateOptions(options) {
   if (options.live && options.mock) throw new ProbeError('E_ARGS')
   options.scenario ??= options.live ? 'inspect' : 'all'
   if (!scenarios.includes(options.scenario) || (!options.live && options.zcode)) throw new ProbeError('E_ARGS')
+  if (options.localError !== undefined && typeof options.localError !== 'boolean') throw new ProbeError('E_ARGS')
+  if (options.localError && (!options.live || options.scenario !== 'session' || options.allowModel || options.allowFileTest)) throw new ProbeError('E_LOCAL_ERROR_SCOPE')
   if (options.live && options.scenario === 'all') throw new ProbeError('E_ARGS')
   if (options.live && !['inspect', 'session'].includes(options.scenario) && options.allowModel !== true) throw new ProbeError('E_MODEL_OPT_IN')
   if (options.live && options.scenario === 'deny' && options.allowFileTest !== true) throw new ProbeError('E_FILE_OPT_IN')
@@ -74,9 +78,10 @@ async function versionOf(entry, cwd, env) {
 /** Run only against a fresh temporary workspace. No arbitrary cwd/prompt option.
  * Return an allowlisted report; raw frames and native stderr never enter it.
  */
-export async function runProbe(input, { signal } = {}) {
+export async function runProbe(input, { signal, onLocalErrorFile = () => {} } = {}) {
   const options = validateOptions({ ...input })
-  const report = { schemaVersion: 1, diagnosticRevision: 2,
+  const localError = options.localError ? new LocalErrorCapture() : null
+  const report = { schemaVersion: 1, diagnosticRevision: 3,
     runtime: { node: process.versions.node, platform: process.platform, arch: process.arch }, profile: PROFILE, evidence: options.live ? 'live-observation' : 'synthetic',
     scenario: options.scenario, status: 'pass', productionReady: false, checks: [],
     cleanup: { workspaceRemoved: false, processesClosed: true },
@@ -107,7 +112,8 @@ export async function runProbe(input, { signal } = {}) {
     report.checks.push({ name: 'cli-version', outcome: 'pass' })
     const start = () => {
       if (signal?.aborted) throw new ProbeError('E_ABORTED')
-      const backend = new AppServerBackend({ command: process.execPath, args: [entry, 'app-server', '--stdio'], cwd, env })
+      const backend = new AppServerBackend({ command: process.execPath, args: [entry, 'app-server', '--stdio'], cwd, env,
+        onRemoteError: localError ? (method, error) => localError.capture(method, error) : undefined })
       backends.push(backend)
       return backend
     }
@@ -183,6 +189,10 @@ export async function runProbe(input, { signal } = {}) {
       catch { report.status = 'fail'; report.checks.push({ name: 'cleanup', outcome: 'fail', error: { code: 'E_CLEANUP' } }) }
     }
     if (!report.cleanup.processesClosed || signal?.aborted) report.status = 'fail'
+  }
+  if (localError) {
+    report.localErrorCapture = localError.status()
+    if (localError.path) onLocalErrorFile(localError.path)
   }
   return report
 }

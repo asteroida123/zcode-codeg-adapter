@@ -48,6 +48,12 @@ export function remoteIndicators(error) {
   let visited = 0
   function visit(value, depth) {
     if (++visited > 32 || depth > 3) return
+    if (typeof value === 'string') {
+      if (value.length > 0) messagePresent = true
+      const text = value.slice(0, 2048)
+      for (const [hint, pattern] of PATTERNS) if (pattern.test(text)) hints.add(hint)
+      return
+    }
     if (Array.isArray(value)) {
       for (const child of value.slice(0, 4)) visit(child, depth + 1)
       return
@@ -62,7 +68,7 @@ export function remoteIndicators(error) {
       const hint = typeof value[key] === 'string' ? SYMBOLS.get(value[key]) : undefined
       if (hint) hints.add(hint)
     }
-    for (const key of ['cause', 'error', 'data', 'detail', 'issues']) {
+    for (const key of ['cause', 'error', 'data', 'detail', 'details', 'issues']) {
       if (Object.hasOwn(value, key)) visit(value[key], depth + 1)
     }
   }

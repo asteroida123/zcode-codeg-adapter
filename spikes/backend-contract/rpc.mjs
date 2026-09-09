@@ -14,12 +14,13 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 export class PrivateRpc {
   constructor({ command, args = [], cwd, env, timeoutMs = 10000, maxFrameBytes = 4 * 1024 * 1024,
     onNotification = () => {}, onRequest = () => { throw new ProbeError('E_METHOD', -32601) },
-    onFault = () => {} }) {
+    onFault = () => {}, onRemoteError = () => {} }) {
     this.timeoutMs = timeoutMs
     this.maxFrameBytes = maxFrameBytes
     this.onNotification = onNotification
     this.onRequest = onRequest
     this.onFault = onFault
+    this.onRemoteError = onRemoteError
     this.pending = new Map()
     this.reverseIds = new Set()
     this.nextId = 1
@@ -76,6 +77,7 @@ export class PrivateRpc {
       }
       const abort = () => finish(new ProbeError('E_ABORTED'))
       const timer = setTimeout(() => finish(new ProbeError('E_TIMEOUT')), timeoutMs)
+      finish.rpcMethod = RPC_METHODS.has(method) ? method : undefined
       this.pending.set(id, finish)
       signal?.addEventListener('abort', abort, { once: true })
       this.write({ id, method, params })
@@ -146,6 +148,9 @@ export class PrivateRpc {
     if (own(frame, 'error') && !object(frame.error)) throw new ProbeError('E_FRAME')
     const finish = this.pending.get(frame.id)
     if (!finish) { this.stats.lateResponses++; return }
+    // Only a matched response to a locally known request can reach the opt-in sink.
+    // The sink must handle its own I/O failures; never retain raw data on ProbeError.
+    if (own(frame, 'error') && finish.rpcMethod) this.onRemoteError(finish.rpcMethod, frame.error)
     finish(own(frame, 'error') ? new ProbeError('E_REMOTE', frame.error.code, remoteIndicators(frame.error)) : null, frame.result)
   }
 

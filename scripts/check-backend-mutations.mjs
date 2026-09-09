@@ -8,6 +8,13 @@ import { spawnSync } from 'node:child_process'
 import assert from 'node:assert/strict'
 const root = fileURLToPath(new URL('../', import.meta.url))
 const cases = [
+  { name: 'private error opt-in', file: 'probe.mjs', testFile: 'test/local-error.test.js',
+    pattern: 'Local diagnostics: default failure',
+    before: 'const localError = options.localError ? new LocalErrorCapture() : null',
+    after: 'const localError = new LocalErrorCapture()' },
+  { name: 'nested details classification', file: 'diagnostics.mjs', testFile: 'test/local-error.test.js',
+    pattern: 'Local diagnostics: string data.details',
+    before: "'detail', 'details', 'issues'", after: "'detail', 'issues'" },
   { name: 'permission deny', file: 'backend.mjs', pattern: 'Backend: permission denial',
     before: "return { decision: 'deny', reason:", after: "return { decision: 'allow', reason:" },
   { name: 'send acceptance barrier', file: 'backend.mjs', pattern: 'Backend: terminal before send acknowledgement',
@@ -24,7 +31,7 @@ for (const mutation of cases) {
     await writeFile(join(dir, 'package.json'), '{"type":"module"}')
     // Reporter defaults vary across Node versions; assertions below parse TAP.
     const run = () => spawnSync(process.execPath,
-      ['--test', '--test-reporter=tap', '--test-name-pattern', mutation.pattern, 'test/backend-contract.test.js'],
+      ['--test', '--test-reporter=tap', '--test-name-pattern', mutation.pattern, mutation.testFile ?? 'test/backend-contract.test.js'],
       { cwd: dir, encoding: 'utf8', timeout: 15000, maxBuffer: 1024 * 1024 })
     assert.equal(run().status, 0, `${mutation.name}: baseline must pass`)
     const path = join(dir, 'spikes/backend-contract', mutation.file)

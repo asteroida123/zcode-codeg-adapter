@@ -137,7 +137,7 @@ for (const [method, completed] of [
     // The live-mode code path uses our fake executable; it is NOT ZCode evidence.
     const report = await runProbe(parseArgs(['--live', '--zcode', fake, '--scenario', 'session']))
     assert.equal(report.status, 'fail')
-    assert.equal(report.diagnosticRevision, 2)
+    assert.equal(report.diagnosticRevision, 3)
     assert.deepEqual(report.checks.at(-1).error, { code: 'E_REMOTE', rpcCode: -32603,
       rpcMethod: method, remoteMessagePresent: true, remoteHints: ['model-configuration'] })
     assert.deepEqual(report.failureContext.completedRpcMethods, completed)
