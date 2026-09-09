@@ -22,8 +22,9 @@ for (const mutation of cases) {
     await cp(join(root, 'spikes'), join(dir, 'spikes'), { recursive: true })
     await cp(join(root, 'test'), join(dir, 'test'), { recursive: true })
     await writeFile(join(dir, 'package.json'), '{"type":"module"}')
+    // Reporter defaults vary across Node versions; assertions below parse TAP.
     const run = () => spawnSync(process.execPath,
-      ['--test', '--test-name-pattern', mutation.pattern, 'test/backend-contract.test.js'],
+      ['--test', '--test-reporter=tap', '--test-name-pattern', mutation.pattern, 'test/backend-contract.test.js'],
       { cwd: dir, encoding: 'utf8', timeout: 15000, maxBuffer: 1024 * 1024 })
     assert.equal(run().status, 0, `${mutation.name}: baseline must pass`)
     const path = join(dir, 'spikes/backend-contract', mutation.file)

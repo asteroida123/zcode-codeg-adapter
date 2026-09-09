@@ -62,7 +62,12 @@ async function handle(frame) {
   }
   if (method === 'test/oversize') { process.stdout.write('x'.repeat(4096)); return }
   if (method === 'test/utf8') { process.stdout.write(Buffer.from([255, 10])); return }
-  if (method === 'test/truncated') { process.stdout.write('{'); process.stdout.end(); return }
+  if (method === 'test/truncated') {
+    // stdout.end() alone does not reliably close a Windows process pipe.
+    // Flush the incomplete frame, then exit so every OS observes a real EOF.
+    process.stdout.write('{', () => process.exit(0))
+    return
+  }
   if (method === 'test/reverse-duplicate') {
     const reverse = { id: 'repeat', method: 'unknown/reverse', params: {} }
     send(reverse); send(reverse); return
