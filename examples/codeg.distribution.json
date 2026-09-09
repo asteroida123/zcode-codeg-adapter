@@ -1,6 +1,6 @@
 {
   "npx": {
-    "package": "file:/ABSOLUTE/PATH/TO/zcode-codeg-adapter",
+    "package": "git+https://github.com/asteroida123/zcode-codeg-adapter.git#0525f10d0eb5f49d7f6fa39cdcf472b53e17c445",
     "cmd": "zcode-codeg",
     "args": [],
     "env": {

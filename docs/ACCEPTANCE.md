@@ -6,7 +6,7 @@
 - npm test：启动层和模拟上游测试；包括环境清理、版本固定、stdout 原样传递、错误脱敏、启动一次、cwd/进程身份不变、POSIX 信号。
 - npm run test:upstream：真实 npm 上游包，在隔离 HOME 中 initialize → 未知方法的 -32601 → EOF / POSIX SIGTERM 退出。没有安装 ZCode，没有发 session/prompt，不测试模型或文件工具。Windows 不模拟 POSIX SIGTERM。
 
-缺少上游依赖必须失败，不可以 skip 后宣称兼容。没有安装锁文件时安装得到的传递依赖可能变动；首次通过后保存真实生成的 package-lock.json。常规安装改用 npm ci --ignore-scripts。
+缺少上游依赖必须失败，不可以 skip 后宣称兼容。仓库中的 npm-shrinkwrap.json 由真实 CI 安装的锁文件转换生成，包含传递依赖的版本与 integrity；常规安装使用 npm ci --ignore-scripts。
 
 ## 真实机器的手工验收（均未由无凭据 CI 代替）
 

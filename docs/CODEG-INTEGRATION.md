@@ -6,7 +6,7 @@
 
 Codeg 已有 `CustomAgentSpec.npx`：package、args、env、cmd、node_required；身份持久化为 `custom:<registry-id>`。本项目选择 `custom:zcode-codeg`。名称可显示 ZCode，但不冒充编译级内置。
 
-- 配置使用 `examples/codeg.local.distribution.json`；`file:` 路径属于 Codeg 后端主机。
+- 配置优先使用固定提交的 `examples/codeg.distribution.json`；本地模板为 `examples/codeg.local.distribution.json`，`file:` 路径属于 Codeg 后端主机。
 - `--version` 返回适配器版本，不是 ZCode CLI 或上游版本；doctor 分开报告上游版本。
 - Codeg 负责记录 ACP transcript；不碰 ZCode 私有历史 schema。
 - 上游负责将 session/new 的 mcpServers 传给后端；Codeg 的 MCP 支持开关可保留开启，但真实委派仍要手工验收。

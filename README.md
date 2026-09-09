@@ -18,18 +18,20 @@ Codeg ── ACP / stdio ── zcode-codeg
 
 ## 安装与检查
 
-需要真实 Node.js **>=22.13.0**（含 `node:sqlite`）、本机安装并已登录的 ZCode。优先使用更新到安全补丁版本的 Node 22/24；22.13.0 是兼容性下限，不是推荐固定的安全版本。ZCode CLI/桌面运行时与上游桥接的兼容性需在本机验收，不能把 `doctor` 成功当成登录或模型调用成功。
+需要真实 Node.js **22（>=22.16.0）或 24**（含 `node:sqlite`）、本机安装并已登录的 ZCode。优先使用更新到安全补丁版本的 Node 22/24；22.16.0 是兼容性下限，不是推荐固定的安全版本。ZCode CLI/桌面运行时与上游桥接的兼容性需在本机验收，不能把 `doctor` 成功当成登录或模型调用成功。
 
 ```bash
 git clone https://github.com/asteroida123/zcode-codeg-adapter.git
 cd zcode-codeg-adapter
-# 有 package-lock.json 时使用 npm ci；首次引导、尚无锁文件时使用 npm install。
-npm install --ignore-scripts
+git checkout 0525f10d0eb5f49d7f6fa39cdcf472b53e17c445
+npm ci --ignore-scripts
 npm run check
 npm test
 npm run test:upstream
 node bin/zcode-codeg.js doctor
 ```
+
+仓库使用实际 npm 安装生成并转换的 `npm-shrinkwrap.json`，锁定直接与传递依赖；它会随 CLI 打包分发，避免只有开发者 clone 安装才受锁文件约束。支持的 Node 下限综合了 SQLite 及完整依赖图的要求，而不只是上游 package.json 的最低声明。
 
 本包不需要构建步骤。`--ignore-scripts` 避免执行依赖的安装生命周期脚本（包括上游的 hub 升级通知）；不要为这个薄适配器增加 postinstall 下载器或自动更新器。首次安装需要访问 npm。项目自身的 `.npmrc` 不会强制约束调用方在全局安装/npx 场景中的配置，外部安装仍需显式使用 `--ignore-scripts`。
 
@@ -39,9 +41,11 @@ node bin/zcode-codeg.js doctor
 
 Codeg：**设置 → 智能体 → 添加自定义智能体 → 手动**。填写 Registry ID `zcode-codeg`、显示名 `ZCode`、版本 `0.1.0`、分发方式 `npx`。
 
+固定运行代码提交的分发 JSON 见 [examples/codeg.distribution.json](examples/codeg.distribution.json)，不需要先发布 npm 包。建议先按上面的源码步骤安装，并运行下面的全局安装命令，再在 Codeg 添加配置；Codeg UI 的实际连接仍需本机验收。
+
 源码本地安装的分发 JSON 模板见 [examples/codeg.local.distribution.json](examples/codeg.local.distribution.json)。将 `file:` 后面的路径改为实际仓库的绝对路径；Windows 在 JSON 中推荐使用 `/` 路径分隔符。`cmd` 必须显式写 `zcode-codeg`，不能让 Codeg 根据带 scope 的包名猜命令。
 
-也可先在仓库目录安装到全局 PATH：
+在仓库目录安装到全局 PATH（不执行依赖的安装脚本）：
 
 ```bash
 npm install -g --ignore-scripts .
@@ -49,26 +53,32 @@ zcode-codeg --version
 zcode-codeg doctor
 ```
 
+手动表单的版本探测命令可显式填 `zcode-codeg --version`。不要假设 Codeg 的 Install/Upgrade 按钮也会采用本仓库的 `.npmrc`；上述预安装命令才是本项目控制的安装路径。
+
 客户端直接启动的命令是 `zcode-codeg`，参数留空，或使用 `node /absolute/path/zcode-codeg-adapter/bin/zcode-codeg.js`。不要启动 `doctor` 作为 ACP 服务；也不要将 Zed 的 `agent_servers` 配置粘贴进 Codeg 的 Distribution 字段。桌面程序找不到 Node 或全局命令时，设置其运行环境/命令路径并重启 Codeg。
 
 Codeg server / Docker 场景下，路径、ZCode 安装及登录都属于**运行 Codeg 后端的机器和系统用户**，不是浏览器所在机器；本包不安装 ZCode，也不迁移凭据。
 
 ### 环境变量
 
-沿用上游支持的 `ZCODE_BIN`、`ZCODE_NODE`、`ZCODE_MODEL`、`ZCODE_BASE_URL`、`ZCODE_ACP_LANG`、`ZCODE_ACP_SANDBOX` 等配置。通常可由上游发现安装路径；非标准安装时显式指定，例如 macOS：
+沿用上游支持的 `ZCODE_BIN`、`ZCODE_NODE`、`ZCODE_MODEL`、`ZCODE_BASE_URL`、`ZCODE_ACP_LANG`、`ZCODE_ACP_SANDBOX` 等配置。通常可由上游发现安装路径；非标准安装时显式指定（以下路径为占位示例）：
 
 ```json
 {
-  "ZCODE_BIN": "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
+  "ZCODE_BIN": "/absolute/path/to/zcode.cjs",
   "ZCODE_ACP_LANG": "zh"
 }
 ```
 
-这是要加进 distribution.npx.env 的内容，不是完整分发 JSON。不要填 API key；先在官方 ZCode 中完成登录。本启动层不读取/复制认证文件，也不输出环境变量或原始上游启动异常。上游仍按其实现管理配置、认证、模型请求和日志；这不是对整个依赖链的隐私/安全认证。
+这是要加进 distribution.npx.env 的内容，不是完整分发 JSON。不要填 API key；先在官方 ZCode 中完成登录。本启动层不读取/复制 ZCode 认证文件，也不输出环境变量或原始上游启动异常。上游仍按其实现管理配置、认证、模型请求和日志；这不是对整个依赖链的隐私/安全认证。
 
-此 Codeg 配置强制 `ZCODE_ACP_REMOTE=0`、`ZCODE_ACP_RUNTIME=node`，移除远程/hub/TUI 恢复的已知启动变量。保留已有 sandbox 设置，不增加自动批准或 yolo 模式。**stdio-only 不是沙箱**：ZCode 仍可按用户权限访问文件、执行工具并连接模型服务。
+上游自己的 `$XDG_CONFIG_HOME/zcode-acp/config.json`（默认 `~/.config/zcode-acp/config.json`）优先于环境变量。若其 `remote.enabled` 为 true，本启动层会拒绝启动并给出 `E_REMOTE_CONFIG`，不会改写文件；使用此配置需将该字段设为 false 或移除。无法读取或格式异常也会停止。需要同时保留另一客户端的远程模式时，当前上游缺少独立进程覆盖接口，本版不支持这类共享配置组合；不要改 HOME/XDG 来冒充凭据隔离。
+
+此 Codeg 配置设置 `ZCODE_ACP_REMOTE=0`、`ZCODE_ACP_RUNTIME=node`，移除远程/hub/TUI 恢复的已知启动变量。启动前和加载上游后都会检查上述磁盘配置；这是启动预检，不是对并发修改配置的沙箱隔离保证。保留已有 sandbox 设置，不增加自动批准或 yolo 模式。**stdio-only 不是沙箱**：ZCode 仍可按用户权限访问文件、执行工具并连接模型服务。
 
 ## 测试与限制
+
+已验证的代码提交、四组跨平台 CI 结果及明确未覆盖的范围见 [docs/VERIFICATION.md](docs/VERIFICATION.md)。
 
 `npm test` 是启动层单元/模拟子进程测试，不证明真实 ZCode 可用。`npm run test:upstream` 使用真实安装的固定上游包，在隔离 HOME、无真实 ZCode 可执行文件的环境中验证 ACP 初始化、错误响应和退出，不消耗模型额度；缺少依赖会失败，不会静默跳过。
 
