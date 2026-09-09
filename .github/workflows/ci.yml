@@ -1,0 +1,49 @@
+name: Adapter contract
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            node: '22.13.0'
+          - os: ubuntu-latest
+            node: '24'
+          - os: macos-latest
+            node: '22'
+          - os: windows-latest
+            node: '22'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm run check
+      - run: npm test
+      - name: Install pinned upstream (no lifecycle scripts)
+        shell: bash
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --ignore-scripts --no-audit --no-fund
+          else
+            npm install --ignore-scripts --no-audit --no-fund
+          fi
+      - run: npm run test:upstream
+      - run: npm pack --dry-run --ignore-scripts
+      - name: Record resolved dependency lock for review
+        if: always() && matrix.os == 'ubuntu-latest' && matrix.node == '22.13.0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-lock
+          path: package-lock.json
+          if-no-files-found: warn
+          retention-days: 7

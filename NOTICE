@@ -1,0 +1,7 @@
+zcode-codeg-adapter
+Copyright 2026 zcode-codeg-adapter contributors
+
+This is an independent community integration, not an official ZCode or Codeg release.
+It depends on zcode-acp-server by the william0wang/zcode-acp contributors (Apache-2.0).
+No upstream implementation is vendored. Upstream and transitive dependency notices
+and licenses remain in their distributed packages. ZCode itself is not included.
