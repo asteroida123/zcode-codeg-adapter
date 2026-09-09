@@ -24,10 +24,13 @@
     "node": "^22.16.0 || ^24.0.0"
   },
   "scripts": {
-    "check": "node --check bin/zcode-codeg.js && node --check src/launcher.js",
-    "test": "node --test test/unit.test.js",
+    "check": "node --check bin/zcode-codeg.js && node --check src/launcher.js && node scripts/check-backend.mjs",
+    "test": "node --test test/unit.test.js test/backend-contract.test.js test/probe.test.js",
     "test:upstream": "node --test test/upstream.test.js",
-    "doctor": "node bin/zcode-codeg.js doctor"
+    "doctor": "node bin/zcode-codeg.js doctor",
+    "test:backend": "node --test test/backend-contract.test.js test/probe.test.js",
+    "test:mutations": "node scripts/check-backend-mutations.mjs",
+    "probe:backend": "node scripts/probe-zcode.mjs"
   },
   "dependencies": {
     "zcode-acp-server": "0.32.0"
