@@ -43,6 +43,16 @@ async function handle(frame) {
   if (frame.jsonrpc) { error(id, -32600); return }
   if (method === 'test/echo') { reply(id, params); return }
   if (method === 'test/error') { error(id, -32004); return }
+  if (method === 'test/error-details') { send({ id, error: params.error }); return }
+  if (fault === `remote-error:${method}`) {
+    if (method === 'session/create') await reverse('session/requestRuntimePreferences', {})
+    send({ id, error: { code: -32603, message: 'No model configured sk-SYNTHETIC-SECRET /private/path' } })
+    return
+  }
+  if (fault === 'unsupported-auth' && method === 'session/create') {
+    await reverse('interaction/requestOfficialMcpAuthHeaders', { token: 'sk-SYNTHETIC-SECRET' })
+    error(id, -32603); return
+  }
   if (method === 'test/hold') { heldResponses.push(id); return }
   if (method === 'test/flush') { for (const held of heldResponses.splice(0)) reply(held, { late: true }); reply(id, {}); return }
   if (method === 'test/release-ack') { reply(heldAck, { accepted: true }); reply(id, {}); return }

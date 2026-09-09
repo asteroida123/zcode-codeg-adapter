@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import { join } from 'node:path'
 import { ProbeError, object } from './errors.mjs'
+import { RPC_METHODS, REVERSE_METHODS, remoteIndicators } from './diagnostics.mjs'
 
 const own = (value, key) => Object.hasOwn(value, key)
 const validId = id => (typeof id === 'string' && id.length <= 512) || Number.isSafeInteger(id)
@@ -22,6 +23,9 @@ export class PrivateRpc {
     this.pending = new Map()
     this.reverseIds = new Set()
     this.nextId = 1
+    this.completedMethods = new Set()
+    this.reverseMethods = new Map()
+    this.unknownReverseRequests = 0
     this.buffer = Buffer.alloc(0)
     this.failure = null
     this.closing = false
@@ -60,8 +64,15 @@ export class PrivateRpc {
         clearTimeout(timer)
         signal?.removeEventListener('abort', abort)
         this.pending.delete(id)
-        if (error) reject(error)
-        else resolve(result)
+        // Clone shared transport failures: simultaneous requests must not overwrite
+        // each other's operation context. Only allowlisted local methods survive.
+        if (error) reject(error instanceof ProbeError
+          ? new ProbeError(error.code, error.rpcCode, { ...error.details, rpcMethod: method })
+          : error)
+        else {
+          if (RPC_METHODS.has(method)) this.completedMethods.add(method)
+          resolve(result)
+        }
       }
       const abort = () => finish(new ProbeError('E_ABORTED'))
       const timer = setTimeout(() => finish(new ProbeError('E_TIMEOUT')), timeoutMs)
@@ -117,6 +128,9 @@ export class PrivateRpc {
       if (this.reverseIds.size >= 4096) throw new ProbeError('E_LIMIT')
       this.reverseIds.add(frame.id)
       this.stats.reverseRequests++
+      if (REVERSE_METHODS.has(frame.method)) {
+        this.reverseMethods.set(frame.method, (this.reverseMethods.get(frame.method) ?? 0) + 1)
+      } else this.unknownReverseRequests++
       // Deliberately concurrent with outgoing calls: runtime preferences can be
       // requested before session/create replies, and permissions during send.
       Promise.resolve().then(() => this.onRequest(frame.method, frame.params ?? {})).then(
@@ -132,7 +146,16 @@ export class PrivateRpc {
     if (own(frame, 'error') && !object(frame.error)) throw new ProbeError('E_FRAME')
     const finish = this.pending.get(frame.id)
     if (!finish) { this.stats.lateResponses++; return }
-    finish(own(frame, 'error') ? new ProbeError('E_REMOTE', frame.error.code) : null, frame.result)
+    finish(own(frame, 'error') ? new ProbeError('E_REMOTE', frame.error.code, remoteIndicators(frame.error)) : null, frame.result)
+  }
+
+  diagnostics() {
+    return {
+      completedRpcMethods: [...this.completedMethods],
+      reverseRpcMethods: [...this.reverseMethods].map(([method, count]) => ({ method, count })),
+      unknownReverseRequests: this.unknownReverseRequests,
+      transport: { ...this.stats },
+    }
   }
 
   fail(error) {

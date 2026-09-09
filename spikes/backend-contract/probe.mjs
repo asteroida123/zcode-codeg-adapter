@@ -76,7 +76,8 @@ async function versionOf(entry, cwd, env) {
  */
 export async function runProbe(input, { signal } = {}) {
   const options = validateOptions({ ...input })
-  const report = { schemaVersion: 1, profile: PROFILE, evidence: options.live ? 'live-observation' : 'synthetic',
+  const report = { schemaVersion: 1, diagnosticRevision: 2,
+    runtime: { node: process.versions.node, platform: process.platform, arch: process.arch }, profile: PROFILE, evidence: options.live ? 'live-observation' : 'synthetic',
     scenario: options.scenario, status: 'pass', productionReady: false, checks: [],
     cleanup: { workspaceRemoved: false, processesClosed: true },
     unverified: ['codeg-ui', 'acp-mapping', 'client-mcp-delegation', 'os-sandbox', 'detached-grandchildren'] }
@@ -168,6 +169,9 @@ export async function runProbe(input, { signal } = {}) {
   } catch (error) {
     report.status = 'fail'
     report.checks.push({ name: phase, outcome: 'fail', error: diagnostic(error) })
+    // Capture at failure time, before cleanup; no additional native requests.
+    const backend = backends.at(-1)
+    if (backend) report.failureContext = { ...backend.rpc.diagnostics(), interactions: { ...backend.metrics } }
   } finally {
     signal?.removeEventListener('abort', stop)
     for (const backend of backends) {

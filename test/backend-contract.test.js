@@ -35,7 +35,7 @@ test('RPC: reverse request ID cannot resolve a same-ID outgoing request', async 
 test('RPC: rejects remote errors without retaining backend message or paths', async t => {
   const { client } = await fixture(t)
   await assert.rejects(client.request('test/error'), error => {
-    assert.deepEqual(diagnostic(error), { code: 'E_REMOTE', rpcCode: -32004 })
+    assert.deepEqual(diagnostic(error), { code: 'E_REMOTE', rpcCode: -32004, remoteMessagePresent: true, remoteHints: [] })
     assert.ok(!JSON.stringify(error).includes('SYNTHETIC-SECRET'))
     return true
   })
@@ -234,4 +234,92 @@ test('Backend: resume returning a different ID is rejected', async t => {
   const second = new AppServerBackend({ ...options, env: { ...options.env, FAKE_ZCODE_FAULT: 'wrong-resume' } })
   try { await assert.rejects(second.open(cwd, { sessionId: id }), code('E_SESSION_ID')) }
   finally { await second.close() }
+})
+
+// Diagnostics are observations, not guessed repairs. These tests use only fake errors.
+test('Diagnostics: categories never retain message, cause, paths, tokens or arbitrary keys', async t => {
+  const { client } = await fixture(t)
+  const nativeError = { code: -32603,
+    message: 'No model configured sk-SYNTHETIC-SECRET /private/path',
+    data: { cause: { code: 'MISSING_CREDENTIAL', message: 'api key is missing sk-OTHER-SECRET' },
+      'sk-KEY-SECRET': 'sk-VALUE-SECRET' },
+    stack: '/Users/private-name/secret.cjs:99',
+  }
+  await assert.rejects(client.request('test/error-details', { error: nativeError }), error => {
+    assert.deepEqual(diagnostic(error), { code: 'E_REMOTE', rpcCode: -32603,
+      remoteMessagePresent: true, remoteHints: ['authentication', 'model-configuration'] })
+    assert.ok(!JSON.stringify(error).includes('SECRET'))
+    assert.ok(!JSON.stringify(error).includes('/private'))
+    assert.equal(error.cause, undefined)
+    return true
+  })
+})
+
+test('Diagnostics: unknown backend text remains unknown, not automatically an auth failure', async t => {
+  const { client } = await fixture(t)
+  for (const message of ['Internal error', 'sk-SECRET /private/path', '', undefined, { secret: 'no model configured' }]) {
+    await assert.rejects(client.request('test/error-details', { error: { code: -32603, message } }), error => {
+      assert.deepEqual(diagnostic(error), { code: 'E_REMOTE', rpcCode: -32603,
+        remoteMessagePresent: typeof message === 'string' && message.length > 0, remoteHints: [] })
+      return true
+    })
+  }
+})
+
+test('Diagnostics: structured symbols distinguish files, dependencies, state and schema', async t => {
+  const { client } = await fixture(t)
+  for (const [symbol, hint] of [['ENOENT', 'file-missing'], ['EACCES', 'filesystem-access'],
+    ['ERR_MODULE_NOT_FOUND', 'runtime-dependency'], ['SQLITE_BUSY', 'state-store'],
+    ['invalid_union', 'request-schema'], ['ECONNREFUSED', 'network']]) {
+    await assert.rejects(client.request('test/error-details', { error: { code: -32603, data: { code: symbol } } }), error => {
+      assert.deepEqual(diagnostic(error).remoteHints, [hint])
+      assert.equal(diagnostic(error).remoteMessagePresent, false)
+      return true
+    })
+  }
+})
+
+test('Diagnostics: error text inspection is bounded, not a payload traversal', async t => {
+  const { client } = await fixture(t)
+  await assert.rejects(client.request('test/error-details', { error: { code: -32603,
+    message: 'x'.repeat(3000) + ' no model configured',
+    arbitraryPayload: { message: 'authentication failed' },
+  } }), error => {
+    assert.deepEqual(diagnostic(error).remoteHints, [])
+    return true
+  })
+})
+
+test('Diagnostics: extra fields and forged operation labels cannot enter public output', () => {
+  const error = new ProbeError('E_REMOTE', -32603, { rpcMethod: '/private/SECRET',
+    remoteHints: ['authentication', 'authentication', 'sk-SECRET', { secret: true }],
+    remoteMessagePresent: 'sk-SECRET', stack: '/private/SECRET', message: 'sk-SECRET' })
+  assert.deepEqual(diagnostic(error), { code: 'E_REMOTE', rpcCode: -32603, remoteHints: ['authentication'] })
+  error.details.rpcMethod = 'session/create'
+  error.details.secret = 'sk-SECRET'
+  error.details.remoteHints.push('sk-SECRET')
+  assert.deepEqual(diagnostic(error), { code: 'E_REMOTE', rpcCode: -32603,
+    rpcMethod: 'session/create', remoteHints: ['authentication'] })
+})
+
+test('Diagnostics: one transport fault gives each concurrent request its own operation', async t => {
+  const { client } = await fixture(t)
+  const first = client.request('session/read', {})
+  const second = client.request('session/messages', {})
+  client.fail(new ProbeError('E_PIPE'))
+  const results = await Promise.allSettled([first, second])
+  assert.equal(diagnostic(results[0].reason).rpcMethod, 'session/read')
+  assert.equal(diagnostic(results[1].reason).rpcMethod, 'session/messages')
+  assert.notEqual(results[0].reason, results[1].reason)
+})
+
+test('Diagnostics: context counts reverse calls without exposing unknown names', async t => {
+  const { client } = await fixture(t)
+  await client.request('test/reverse', { method: 'interaction/requestOfficialMcpAuthHeaders' })
+  await client.request('test/reverse', { method: 'sk-SECRET/private' })
+  const context = client.diagnostics()
+  assert.deepEqual(context.reverseRpcMethods, [{ method: 'interaction/requestOfficialMcpAuthHeaders', count: 1 }])
+  assert.equal(context.unknownReverseRequests, 1)
+  assert.equal(context.transport.reverseRequests, 2)
+  assert.ok(!JSON.stringify(context).includes('SECRET'))
 })

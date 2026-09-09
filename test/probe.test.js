@@ -120,3 +120,50 @@ for (const [fault, scenario] of [['stop-natural', 'cancel'], ['no-permission', '
     }
   })
 }
+
+for (const [method, completed] of [
+  ['session/create', []],
+  ['session/subscribe', ['session/create']],
+  ['session/read', ['session/create', 'session/subscribe']],
+  ['session/messages', ['session/create', 'session/subscribe', 'session/read']],
+]) {
+  test(`Probe: -32603 at ${method} reports exact failing operation and completed calls`, async t => {
+    const old = process.env.FAKE_ZCODE_FAULT
+    process.env.FAKE_ZCODE_FAULT = `remote-error:${method}`
+    t.after(() => {
+      if (old === undefined) delete process.env.FAKE_ZCODE_FAULT
+      else process.env.FAKE_ZCODE_FAULT = old
+    })
+    // The live-mode code path uses our fake executable; it is NOT ZCode evidence.
+    const report = await runProbe(parseArgs(['--live', '--zcode', fake, '--scenario', 'session']))
+    assert.equal(report.status, 'fail')
+    assert.equal(report.diagnosticRevision, 2)
+    assert.deepEqual(report.checks.at(-1).error, { code: 'E_REMOTE', rpcCode: -32603,
+      rpcMethod: method, remoteMessagePresent: true, remoteHints: ['model-configuration'] })
+    assert.deepEqual(report.failureContext.completedRpcMethods, completed)
+    assert.equal(report.failureContext.interactions.preferences, 1)
+    assert.deepEqual(report.failureContext.reverseRpcMethods, [{ method: 'session/requestRuntimePreferences', count: 1 }])
+    assert.deepEqual(report.cleanup, { workspaceRemoved: true, processesClosed: true })
+    const text = JSON.stringify(report)
+    for (const privateText of ['SYNTHETIC-SECRET', 'No model configured', '/private/path', 'workspacePath', 'sess_']) {
+      assert.ok(!text.includes(privateText), privateText)
+    }
+  })
+}
+
+test('Probe: failure retains evidence of unsupported auth callback, without returning its token', async t => {
+  const old = process.env.FAKE_ZCODE_FAULT
+  process.env.FAKE_ZCODE_FAULT = 'unsupported-auth'
+  t.after(() => {
+    if (old === undefined) delete process.env.FAKE_ZCODE_FAULT
+    else process.env.FAKE_ZCODE_FAULT = old
+  })
+  const report = await runProbe(parseArgs(['--live', '--zcode', fake, '--scenario', 'session']))
+  assert.equal(report.status, 'fail')
+  assert.equal(report.checks.at(-1).error.rpcMethod, 'session/create')
+  // Generic -32603 remains unclassified even when a callback preceded it.
+  assert.deepEqual(report.checks.at(-1).error.remoteHints, [])
+  assert.equal(report.failureContext.interactions.unsupportedInteractions, 1)
+  assert.deepEqual(report.failureContext.reverseRpcMethods, [{ method: 'interaction/requestOfficialMcpAuthHeaders', count: 1 }])
+  assert.ok(!JSON.stringify(report).includes('SYNTHETIC-SECRET'))
+})
