@@ -1,5 +1,10 @@
 # zcode-codeg-adapter
 
+> **后端验证分支：**此分支新增独立的原生 app-server 探测工具，不改变下述生产启动层。
+> 先运行 `node scripts/probe-zcode.mjs` 做无账号、无网络的合成验证；真实运行需要明确
+> 指定 `--live`，模型场景还需要 `--allow-model`。完整命令、风险和验收边界见
+> [后端验证说明](docs/BACKEND-PROBE.md)。不要把原启动器或合成验证当成正式内置交付。
+
 面向 **Codeg** 的 ZCode ACP **薄启动适配层**。本仓库不是另一套 ZCode 协议实现，也不是 Codeg/ZCode 官方项目。
 
 ```text

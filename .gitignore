@@ -4,3 +4,7 @@ coverage/
 .env
 .env.*
 !.env.example
+
+# Live diagnostic summaries are local artifacts, never source fixtures.
+probe-report*.json
+probe-reports/

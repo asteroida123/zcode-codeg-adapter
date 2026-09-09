@@ -31,6 +31,8 @@ jobs:
           node-version: ${{ matrix.node }}
       - run: npm run check
       - run: npm test
+      - run: npm run test:mutations
+      - run: npm run probe:backend
       - name: Install locked upstream (no lifecycle scripts)
         run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run test:upstream
