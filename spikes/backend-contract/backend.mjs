@@ -1,7 +1,7 @@
 import { realpath } from 'node:fs/promises'
 import { PrivateRpc } from './rpc.mjs'
 import { ProbeError, object } from './errors.mjs'
-import { identityShape } from './turn-evidence.mjs'
+import { identityShape, turnIdentity } from './turn-evidence.mjs'
 import { modelReferenceFromSnapshot, modelRuntimeFromSnapshot, rebindOriginalModel } from './resume-model.mjs'
 import { restoreWarningIndicator } from './diagnostics.mjs'
 
@@ -152,9 +152,11 @@ export class AppServerBackend {
     const cancelled = ['cancelled', 'canceled', 'aborted', 'interrupted'].includes(resultType)
     // A terminal after stop may just be natural completion. Do not call it a
     // proven cancellation without an explicit backend cancellation reason.
+    const terminalIdentity = turnIdentity(turn.terminal)
+    const terminalIdMatched = turn.turnId !== null && terminalIdentity.id === turn.turnId
     turn.finish(null, { streams: turn.streams, tools: turn.tools, denied: turn.denied,
-      turnIdObserved: turn.turnId !== null, terminalIdMatched: turn.terminal.payload.turnId === turn.turnId && turn.turnId !== null, cancelSent: turn.cancelSent,
-      cancelled, terminalObserved: true,
+      turnIdObserved: turn.turnId !== null, terminalIdMatched, cancelSent: turn.cancelSent,
+      cancelled, terminalObserved: true, turnCorrelation: terminalIdMatched ? `matched-${terminalIdentity.source}-turn-id` : 'unverified',
       identityEvidence: { startCount: turn.startCount,
         firstStart: turn.firstStartIdentity, terminal: identityShape(turn.terminal) } })
   }
@@ -181,8 +183,11 @@ export class AppServerBackend {
     state.lastSeq = params.seq
     const turn = state.active
     if (!turn || !state.ready) return
-    const nativeId = params.payload.turnId
-    if (nativeId !== undefined && !idValue(nativeId)) throw new ProbeError('E_SCHEMA')
+    // Envelope-level turnId is the verified 0.16.5 identity location; payload
+    // turnId remains a versioned fallback. Invalid values fail loudly.
+    const identity = turnIdentity(params)
+    if (identity.source === 'invalid') throw new ProbeError('E_SCHEMA')
+    const nativeId = identity.id
     if (nativeId && (state.finished.has(nativeId) || (turn.turnId && turn.turnId !== nativeId))) {
       this.metrics.staleEvents++; return
     }
@@ -190,7 +195,7 @@ export class AppServerBackend {
       turn.startCount++
       turn.firstStartIdentity ??= identityShape(params)
       turn.started = true
-      turn.turnId = nativeId ?? null
+      turn.turnId ??= nativeId
     } else if (!turn.started) {
       this.metrics.staleEvents++
     } else if (params.type === 'model.streaming') {

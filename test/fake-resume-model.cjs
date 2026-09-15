@@ -45,7 +45,11 @@ function snapshot() {
       mode: { current: rebound && fault === 'mode-drift' ? 'build' : 'plan' } } }
 }
 function event(type, payload = {}) {
-  out({ method: 'session/event', params: { sessionId: saved.id, seq: ++seq, type, payload } })
+  // Envelope-level turnId mirrors the verified real-CLI identity layout.
+  const { turnId, ...rest } = payload
+  const params = { sessionId: saved.id, seq: ++seq, type, payload: rest }
+  if (turnId !== undefined) params.turnId = turnId
+  out({ method: 'session/event', params })
 }
 async function handle(frame) {
   if (!frame.method) { pending.get(frame.id)?.(); pending.delete(frame.id); return }

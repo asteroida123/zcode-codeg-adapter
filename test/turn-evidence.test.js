@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AppServerBackend } from '../spikes/backend-contract/backend.mjs'
 import { parseArgs, runProbe } from '../spikes/backend-contract/probe.mjs'
-import { identityShape, modelObservation } from '../spikes/backend-contract/turn-evidence.mjs'
+import { identityShape, modelObservation, turnIdentity } from '../spikes/backend-contract/turn-evidence.mjs'
 
 // Independent SYNTHETIC wire fixture. No real ZCode, inherited HOME, credentials,
 // native transcripts or network. The fake IDs deliberately look like secrets.
@@ -91,6 +91,25 @@ test('Turn evidence: a matched ID cannot manufacture a verified answer or idle s
   assert.equal(observed.stateIdleAfterTurn, false)
 })
 
+test('Turn evidence: explicit correlation labels survive observation verbatim', () => {
+  for (const [label, matched] of [['matched-envelope-turn-id', true], ['matched-payload-turn-id', true], ['unverified', false]]) {
+    const observed = modelObservation({terminalIdMatched: matched, turnCorrelation: label},
+      {lastAssistantHasMarker: true, idle: true})
+    assert.equal(observed.turnCorrelation, label)
+    assert.equal(observed.terminalIdMatched, matched)
+  }
+})
+
+test('Turn evidence: normalization prefers the envelope and rejects invalid values', () => {
+  assert.deepEqual(turnIdentity({turnId: 'env', payload: {turnId: 'payload'}}), {id: 'env', source: 'envelope'})
+  assert.deepEqual(turnIdentity({payload: {turnId: 'payload'}}), {id: 'payload', source: 'payload'})
+  assert.deepEqual(turnIdentity({payload: {}}), {id: null, source: 'absent'})
+  assert.deepEqual(turnIdentity({}), {id: null, source: 'absent'})
+  for (const bad of [{turnId: 7}, {turnId: ''}, {payload: {turnId: null}}, {payload: {turnId: 'x'.repeat(513)}}]) {
+    assert.deepEqual(turnIdentity(bad), {id: null, source: 'invalid'})
+  }
+})
+
 for (const mode of ['missing', 'envelope', 'execution', 'payload']) {
   test(`Turn evidence: ${mode} wire identity preserves strict attribution`, async t => {
     const {backend, cwd} = await fixture(t, mode)
@@ -98,13 +117,15 @@ for (const mode of ['missing', 'envelope', 'execution', 'payload']) {
     const result = await backend.prompt(id, 'ZCODE_PROBE_SYNTHETIC', {timeoutMs: 5000})
     const snapshot = await backend.inspect(id, 'ZCODE_PROBE_SYNTHETIC')
     const observed = modelObservation(result, snapshot)
+    const correlated = mode === 'envelope' || mode === 'payload'
     assert.equal(observed.responseMarkerMatched, true)
     assert.equal(observed.stateIdleAfterTurn, true)
     assert.equal(observed.streams, 1)
     assert.equal(observed.terminalObserved, true)
-    assert.equal(observed.turnIdObserved, mode === 'payload')
-    assert.equal(observed.terminalIdMatched, mode === 'payload')
-    assert.equal(observed.turnCorrelation, mode === 'payload' ? 'matched-payload-turn-id' : 'unverified')
+    assert.equal(observed.turnIdObserved, correlated)
+    assert.equal(observed.terminalIdMatched, correlated)
+    assert.equal(observed.turnCorrelation, mode === 'envelope' ? 'matched-envelope-turn-id'
+      : mode === 'payload' ? 'matched-payload-turn-id' : 'unverified')
     const expected = { ...absent }
     if (mode === 'payload') expected.payloadTurnId = 'string'
     if (mode === 'envelope') expected.envelopeTurnId = 'string'
@@ -122,13 +143,13 @@ for (const mode of ['missing', 'envelope', 'execution', 'payload']) {
     const { script } = await fixture(t, mode)
     // Drives the live code path with a synthetic executable, NOT live ZCode.
     const report = await runProbe(parseArgs(['--live', '--zcode', script, '--allow-model', '--scenario', 'smoke']))
-    assert.equal(report.turnEvidenceRevision, 1)
-    assert.equal(report.status, mode === 'payload' ? 'pass' : 'inconclusive')
+    assert.equal(report.turnEvidenceRevision, 2)
+    assert.equal(report.status, ['envelope', 'payload'].includes(mode) ? 'pass' : 'inconclusive')
     assert.equal(report.productionReady, false)
     const check = report.checks.find(check => check.name === 'smoke')
     assert.equal(check.outcome, report.status)
     assert.equal(check.observed.responseMarkerMatched, true)
-    assert.equal(check.observed.terminalIdMatched, mode === 'payload')
+    assert.equal(check.observed.terminalIdMatched, ['envelope', 'payload'].includes(mode))
     assert.deepEqual(report.cleanup, {workspaceRemoved: true, processesClosed: true})
     for (const secret of ['sk-PRIVATE', 'ZCODE_PROBE_', 'synthetic-session']) assert.ok(!JSON.stringify(report).includes(secret))
   })

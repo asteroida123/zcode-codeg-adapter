@@ -21,8 +21,16 @@ function reverse(method, params) {
   return new Promise(resolve => { backwards.set(id, resolve); send({ id, method, params }) })
 }
 function persist() { fs.writeFileSync(storage, JSON.stringify(sessions)) }
+// Envelope-level turnId is the verified real-CLI layout; the payload-turn-id
+// fault keeps the versioned fallback path covered. Identity-less turns are
+// modeled by omitting turnId entirely.
+const envelopeIds = fault !== 'payload-turn-id'
 function event(id, type, payload = {}, seq) {
-  send({ method: 'session/event', params: { sessionId: id, type, seq: seq ?? ++sessions[id].seq, payload } })
+  const { turnId, ...rest } = payload
+  const params = { sessionId: id, type, seq: seq ?? ++sessions[id].seq }
+  if (turnId !== undefined && envelopeIds) params.turnId = turnId
+  params.payload = turnId !== undefined && !envelopeIds ? payload : rest
+  send({ method: 'session/event', params })
 }
 function finish(id, resultType, text) {
   const task = active.get(id)

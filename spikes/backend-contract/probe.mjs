@@ -86,7 +86,7 @@ async function versionOf(entry, cwd, env) {
 export async function runProbe(input, { signal, onLocalErrorFile = () => {} } = {}) {
   const options = validateOptions({ ...input })
   const localError = options.localError ? new LocalErrorCapture() : null
-  const report = { schemaVersion: 1, diagnosticRevision: 3, turnEvidenceRevision: 1,
+  const report = { schemaVersion: 1, diagnosticRevision: 3, turnEvidenceRevision: 2,
     runtime: { node: process.versions.node, platform: process.platform, arch: process.arch }, profile: PROFILE, evidence: options.live ? 'live-observation' : 'synthetic',
     scenario: options.scenario, status: 'pass', productionReady: false, checks: [],
     cleanup: { workspaceRemoved: false, processesClosed: true },
