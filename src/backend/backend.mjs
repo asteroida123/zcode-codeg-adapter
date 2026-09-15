@@ -22,14 +22,16 @@ function flushPermissions(heldPermissions, metrics, sessionId = null) {
   }
 }
 
-/** Candidate backend seam. Owns semantic operations; callers do not send RPC.
- * This spike intentionally does not advertise any ACP capabilities.
+/** Production backend seam. Owns semantic operations; callers do not send RPC.
  * Wire facts and the still-unverified assumptions are in docs/BACKEND-PROBE.md.
  */
 export class AppServerBackend {
   constructor(options) {
     this.sessions = new Map()
     this.permissionMode = options.permissionMode === 'hold' ? 'hold' : 'deny'
+    // Production permission seam: when present, decisions come from this
+    // callback (the ACP client). Absent (probe default) -> deny/hold rules.
+    this.onPermission = typeof options.onPermission === 'function' ? options.onPermission : null
     this.heldPermissions = new Map()
     this.metrics = { preferences: 0, permissionsDenied: 0, unsupportedInteractions: 0,
       unknownNotifications: 0, staleEvents: 0, unknownEvents: 0 }
@@ -43,12 +45,12 @@ export class AppServerBackend {
     })
   }
 
-  async open(cwd, { sessionId, mode = 'plan' } = {}) {
+  async open(cwd, { sessionId, mode = 'plan', mcpServers = [] } = {}) {
     if (!['plan', 'build'].includes(mode)) throw new ProbeError('E_MODE')
     const canonical = await realpath(cwd)
     const workspace = { workspacePath: canonical, workspaceKey: canonical }
     const result = await this.rpc.request(sessionId ? 'session/resume' : 'session/create',
-      sessionId ? { sessionId, workspace } : { workspace, mode, mcpServers: [] })
+      sessionId ? { sessionId, workspace } : { workspace, mode, mcpServers: this.#sanitizeMcpServers(mcpServers) })
     const id = result?.session?.sessionId
     if (!idValue(id) || (sessionId && id !== sessionId) || this.sessions.has(id)) throw new ProbeError('E_SESSION_ID')
     const returnedCwd = result?.session?.workspace?.workspacePath
@@ -71,10 +73,34 @@ export class AppServerBackend {
     }
   }
 
+  /** Stdio MCP servers pass through with allowlisted fields only. Entries
+   * without a command (HTTP/SSE and other transports) are rejected loudly
+   * instead of being silently dropped.
+   */
+  #sanitizeMcpServers(mcpServers) {
+    if (!Array.isArray(mcpServers)) throw new ProbeError('E_MCP_CONFIG')
+    return mcpServers.map(server => {
+      if (!object(server) || !idValue(server.name) || !idValue(server.command)) throw new ProbeError('E_MCP_CONFIG')
+      return {
+        name: server.name, command: server.command,
+        ...(Array.isArray(server.args) ? { args: server.args.map(String).slice(0, 64) } : {}),
+        ...(Array.isArray(server.env) ? { env: server.env.filter(item => object(item) && idValue(item.name)).slice(0, 64) } : {}),
+      }
+    }).slice(0, 32)
+  }
+
   state(id) {
     const state = this.sessions.get(id)
     if (!state?.ready) throw new ProbeError('E_SESSION_ID')
     return state
+  }
+
+  /** Raw message history for ACP session/load replay. Bounded by callers. */
+  async messages(id) {
+    this.state(id)
+    const history = await this.rpc.request('session/messages', { sessionId: id })
+    if (!Array.isArray(history?.messages)) throw new ProbeError('E_SCHEMA')
+    return history.messages
   }
 
   async inspect(id, marker = '') {
@@ -117,7 +143,7 @@ export class AppServerBackend {
     return rebindOriginalModel(this.rpc, id, original)
   }
 
-  prompt(id, content, { timeoutMs = 30000, cancelOnStream = false, cancelTimeoutMs = 3000, closeOnCancelTimeout = true, runtimeModel = null } = {}) {
+  prompt(id, content, { timeoutMs = 30000, cancelOnStream = false, cancelTimeoutMs = 3000, closeOnCancelTimeout = true, runtimeModel = null, onStream = null } = {}) {
     const state = this.state(id)
     if (state.active) return Promise.reject(new ProbeError('E_BUSY'))
     if (this.rpc.failure || this.rpc.closing) return Promise.reject(new ProbeError('E_CLOSED'))
@@ -132,6 +158,7 @@ export class AppServerBackend {
     return new Promise((resolve, reject) => {
       const turn = { accepted: false, started: false, turnId: null, terminal: null, cancelSent: false,
         streams: 0, tools: 0, denied: 0, cancelOnStream, cancelTimeoutMs, closeOnCancelTimeout,
+        onStream: typeof onStream === 'function' ? onStream : null,
         startCount: 0, firstStartIdentity: null,
         timer: null, cancelTimer: null, settled: false, finish: null }
       turn.finish = (error, result) => {
@@ -229,6 +256,16 @@ export class AppServerBackend {
       this.metrics.staleEvents++
     } else if (params.type === 'model.streaming') {
       turn.streams++
+      // Text relay hook for the ACP mapping. The backend itself never retains
+      // or interprets model text; unknown payload shapes relay as empty.
+      // Some backends stream before the send acknowledgement, so relaying does
+      // not wait for acceptance; cancellation still does.
+      if (typeof turn.onStream === 'function' &&
+          (params.payload.kind === undefined || params.payload.kind === 'text_delta')) {
+        const text = typeof params.payload.text === 'string' ? params.payload.text
+          : typeof params.payload.delta === 'string' ? params.payload.delta : ''
+        if (text.length > 0) turn.onStream(text.slice(0, 2048))
+      }
       if (turn.accepted && turn.cancelOnStream) this.cancel(params.sessionId)
     } else if (params.type === 'tool.updated') {
       turn.tools++
@@ -249,13 +286,23 @@ export class AppServerBackend {
     return { unknownEventTypes: [...this.unknownEventTypes].map(([type, count]) => ({ type, count })) }
   }
 
-  reverseRequest(method, params) {
+  async reverseRequest(method, params) {
     if (method === 'session/requestRuntimePreferences') {
       this.metrics.preferences++
       return { nativeSearchEnhancementsEnabled: false, memoryEnabled: false, askUserQuestionAutoResolutionEnabled: false }
     }
     if (method === 'interaction/requestPermission') {
       const turn = this.sessions.get(params.sessionId)?.active
+      if (this.onPermission) {
+        // Decisions belong to the ACP client. Any callback failure denies;
+        // nothing here can manufacture an allow.
+        let decision = null
+        try { decision = await this.onPermission(params) } catch { decision = null }
+        if (decision?.decision === 'allow') return { decision: 'allow', reason: 'allowed by client' }
+        this.metrics.permissionsDenied++
+        if (turn) turn.denied++
+        return { decision: 'deny', reason: typeof decision?.reason === 'string' && decision.reason ? decision.reason : 'denied by client' }
+      }
       if (this.permissionMode === 'hold' && turn) {
         // Hold the decision open: cancellation must settle the turn while the
         // approval is still pending, never by silently approving it.
