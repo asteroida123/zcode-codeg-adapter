@@ -2,7 +2,7 @@ import { realpath } from 'node:fs/promises'
 import { PrivateRpc } from './rpc.mjs'
 import { ProbeError, object } from './errors.mjs'
 import { identityShape } from './turn-evidence.mjs'
-import { modelReferenceFromSnapshot, rebindOriginalModel } from './resume-model.mjs'
+import { modelReferenceFromSnapshot, modelRuntimeFromSnapshot, rebindOriginalModel } from './resume-model.mjs'
 import { restoreWarningIndicator } from './diagnostics.mjs'
 
 export const PROFILE = 'app-server-cli-0.16.5-candidate'
@@ -65,6 +65,7 @@ export class AppServerBackend {
     const history = await this.rpc.request('session/messages', { sessionId: id })
     if (!object(state?.projection) || !Array.isArray(history?.messages)) throw new ProbeError('E_SCHEMA')
     this.state(id).modelReference = modelReferenceFromSnapshot(state)
+    this.state(id).publishedRuntimeModel = modelRuntimeFromSnapshot(state)
     const assistant = history.messages.filter(message => message?.info?.role === 'assistant')
     const text = assistant.at(-1)?.parts?.filter(part => part.type === 'text').map(part => part.text ?? '').join('') ?? ''
     // Only return measurements. Never return model text or native IDs in reports.
@@ -81,6 +82,14 @@ export class AppServerBackend {
     return { ...ref }
   }
 
+  /** The model runtime descriptor published by the native snapshot, if any.
+   * Null on 0.16.5: the CLI does not publish one to protocol clients.
+   */
+  publishedRuntimeModel(id) {
+    const runtime = this.state(id).publishedRuntimeModel
+    return runtime ? { ...runtime } : null
+  }
+
   async rebindResumedModel(id, original, { allowRebind = false } = {}) {
     const state = this.state(id)
     if (allowRebind !== true || !state.resumed) throw new ProbeError('E_REBIND_SCOPE')
@@ -95,13 +104,12 @@ export class AppServerBackend {
     if (state.active) return Promise.reject(new ProbeError('E_BUSY'))
     if (this.rpc.failure || this.rpc.closing) return Promise.reject(new ProbeError('E_CLOSED'))
     const params = { sessionId: id, content }
-    // Native send schema accepts an explicit runtimeModel; the backend applies
-    // it before guarding. Only a caller-supplied reference passes through.
+    // Native send schema accepts an explicit runtimeModel descriptor which the
+    // backend applies before guarding. Only an object passes through; semantic
+    // validation and any errors stay with the native schema (-32602 feedback).
     if (runtimeModel !== null) {
-      if (!object(runtimeModel) || !idValue(runtimeModel.providerId) || !idValue(runtimeModel.modelId)) {
-        return Promise.reject(new ProbeError('E_SEND_RUNTIME_MODEL'))
-      }
-      params.runtimeModel = { providerId: runtimeModel.providerId, modelId: runtimeModel.modelId }
+      if (!object(runtimeModel)) return Promise.reject(new ProbeError('E_SEND_RUNTIME_MODEL'))
+      params.runtimeModel = runtimeModel
     }
     return new Promise((resolve, reject) => {
       const turn = { accepted: false, started: false, turnId: null, terminal: null, cancelSent: false,

@@ -82,7 +82,9 @@ for (const [state, errorCode] of [
   })
 }
 
-test('Resume: continued send passes only an explicit well-formed runtimeModel reference', async () => {
+test('Resume: continued send relays only an explicit published runtime descriptor', async () => {
+  const runtime = { revision: 'catalog-1', generatedAt: 1,
+    model: { modelId: 'm' }, provider: { providerId: 'p' } }
   const build = () => {
     const subject = Object.create(AppServerBackend.prototype)
     subject.sessions = new Map([['s', { ready: true, active: null, finished: new Set() }]])
@@ -93,11 +95,11 @@ test('Resume: continued send passes only an explicit well-formed runtimeModel re
     return subject
   }
   const subject = build()
-  await assert.rejects(subject.prompt('s', 'hello', { runtimeModel: original }), hasCode('E_REMOTE'))
+  await assert.rejects(subject.prompt('s', 'hello', { runtimeModel: runtime }), hasCode('E_REMOTE'))
   assert.equal(subject.captured.method, 'session/send')
-  assert.deepEqual(subject.captured.params, { sessionId: 's', content: 'hello', runtimeModel: original })
+  assert.deepEqual(subject.captured.params, { sessionId: 's', content: 'hello', runtimeModel: runtime })
   const invalid = build()
-  await assert.rejects(invalid.prompt('s', 'hello', { runtimeModel: { providerId: '', modelId: 'm' } }), hasCode('E_SEND_RUNTIME_MODEL'))
+  await assert.rejects(invalid.prompt('s', 'hello', { runtimeModel: 'provider' }), hasCode('E_SEND_RUNTIME_MODEL'))
   assert.equal(invalid.captured, undefined)
   const bare = build()
   await assert.rejects(bare.prompt('s', 'hello'), hasCode('E_REMOTE'))
@@ -114,7 +116,7 @@ test('Resume: baseline failure preserves first answer and restored history, with
   assert.equal(report.resumeProgress.nativeResumeAccepted, true)
   assert.equal(report.resumeProgress.stage, 'continued-send')
   assert.equal(report.resumeProgress.rebindRequested, false)
-  assert.equal(report.resumeProgress.runtimeModelOnSend, false)
+  assert.equal(report.resumeProgress.runtimeModelRelayed, false)
   assert.equal(report.resumeProgress.modelRebind, undefined)
   assert.equal(report.resumeProgress.secondTurnRetainedContext, undefined)
   assert.ok(!report.failureContext.completedRpcMethods.includes('session/setModel'))
@@ -138,8 +140,10 @@ test('Resume: opt-in reselection permits continued response in the synthetic gua
   assert.equal(report.resumeProgress.modelRebind.originalSelectionRetained, true)
   assert.equal(report.resumeProgress.modelRebind.planModeRetained, true)
   assert.equal(report.resumeProgress.historyRetainedAfterRebind, true)
-  assert.equal(report.resumeProgress.restoreWarningBeforeSend, null)
-  assert.equal(report.resumeProgress.runtimeModelOnSend, true)
+  // Live 0.16.5 behavior: the warning survives same-model reselection; only a
+  // send carrying the published runtime descriptor clears it.
+  assert.equal(report.resumeProgress.restoreWarningBeforeSend, 'runtime-model-unavailable')
+  assert.equal(report.resumeProgress.runtimeModelRelayed, true)
   assert.equal(report.resumeProgress.secondTurnRetainedContext, true)
   assert.equal(report.resumeProgress.stage, 'complete')
   for (const privateText of ['private-provider', 'private-model', 'sess-private', 'ZCODE_PROBE_', 'SYNTHETIC-SECRET',
@@ -165,6 +169,7 @@ for (const [fault, errorCode, stage] of [
   ['busy', 'E_RESUME_NOT_IDLE', 'rebind-original-model'],
   ['rebind-rejected', 'E_REMOTE', 'rebind-original-model'],
   ['still-guarded', 'E_REMOTE', 'continued-send'],
+  ['unpublished-runtime', 'E_REMOTE', 'continued-send'],
   ['missing-history', 'E_HISTORY', 'read-restored-history'],
   ['lost-history', 'E_HISTORY', 'rebind-original-model'],
 ]) {
@@ -177,7 +182,15 @@ for (const [fault, errorCode, stage] of [
     assert.notEqual(report.resumeProgress.secondTurnRetainedContext, true)
     if (fault === 'rebind-rejected') assert.equal(report.checks.at(-1).error.rpcMethod, 'session/setModel')
     // A guard that survives reselection is reported, never silently cleared.
-    if (fault === 'still-guarded') assert.equal(report.resumeProgress.restoreWarningBeforeSend, 'runtime-model-unavailable')
+    if (fault === 'still-guarded' || fault === 'unpublished-runtime') {
+      assert.equal(report.resumeProgress.restoreWarningBeforeSend, 'runtime-model-unavailable')
+    }
+    if (fault === 'unpublished-runtime') {
+      // Mirrors live run evidence: without a relayed descriptor, reselection
+      // alone still ends in the guarded -32031 send rejection.
+      assert.equal(report.resumeProgress.runtimeModelRelayed, false)
+      assert.equal(report.checks.at(-1).error.rpcCode, -32031)
+    }
     assert.deepEqual(report.cleanup, { workspaceRemoved: true, processesClosed: true })
   })
 }

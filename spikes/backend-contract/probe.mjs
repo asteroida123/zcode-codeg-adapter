@@ -192,12 +192,12 @@ export async function runProbe(input, { signal, onLocalErrorFile = () => {} } = 
           // prompt is sent. Recording it ties a -32031 send rejection to the
           // native guard without spending a turn on the attempt.
           progress.restoreWarningBeforeSend = preSend.restoreWarning
-          // With rebind opt-in, the continued send carries the same original
-          // reference in the native runtimeModel channel; the backend applies
-          // it before guarding. Recorded as a flag, never as model identity.
-          progress.runtimeModelOnSend = options.rebindResumeModel === true
+          // Relay only a model runtime the native snapshot itself published
+          // (none on 0.16.5); constructing provider definitions is out of scope.
+          const publishedRuntime = options.rebindResumeModel ? backend.publishedRuntimeModel(id) : null
+          progress.runtimeModelRelayed = publishedRuntime !== null
           const continued = await backend.prompt(id, 'Reply with exactly the token you replied with earlier. Do not use tools or access files.',
-            { timeoutMs: 60000, runtimeModel: options.rebindResumeModel ? originalModel : null })
+            { timeoutMs: 60000, runtimeModel: publishedRuntime })
           progress.stage = 'verify-continued-history'
           const after = await backend.inspect(id, marker)
           progress.continuedTurn = modelObservation(continued, after)

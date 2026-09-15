@@ -10,6 +10,7 @@ let saved = null
 try { saved = JSON.parse(fs.readFileSync(file, 'utf8')) } catch {}
 let restored = false
 let rebound = false
+let runtimeApplied = false
 let seq = 0
 let prefsId = 1000
 const pending = new Map()
@@ -25,16 +26,23 @@ async function preferences() {
     out({ id, method: 'session/requestRuntimePreferences', params: {} })
   })
 }
+// Synthetic full runtime descriptor in the observed native send-schema shape
+// (revision/generatedAt/model/provider). Real 0.16.5 publishes none.
+const RUNTIME = { revision: 'catalog-1', generatedAt: 1,
+  model: { modelId: 'private-model' }, provider: { providerId: 'private-provider' } }
 function snapshot() {
   let model = { providerId: 'private-provider', modelId: 'private-model' }
   if (fault === 'missing-reference' || (restored && fault === 'missing-restored-reference')) model = { modelId: 'private-model' }
   if ((restored && fault === 'pre-rebind-drift') || (rebound && fault === 'post-rebind-drift')) model.modelId = 'other-model'
-  // Mirrors the observed native layout: the restore warning lives INSIDE the
-  // projection (session/read), until a model runtime is applied again.
-  const guarded = restored && (!rebound || fault === 'still-guarded')
+  // Mirrors the observed native layout AND live behavior: the restore warning
+  // lives INSIDE the projection and survives same-model reselection; only a
+  // send that carries the full published runtime descriptor clears it.
+  const guarded = restored && !runtimeApplied
   return { projection: { status: fault === 'busy' && restored ? 'running' : 'idle',
       ...(guarded ? { lastError: { message: '历史任务使用的模型已不可用', type: 'ZCODE_RUNTIME_MODEL_UNAVAILABLE' } } : {}) },
-    settings: { model: { current: model }, mode: { current: rebound && fault === 'mode-drift' ? 'build' : 'plan' } } }
+    settings: { model: { current: model },
+      runtimeModel: fault === 'unpublished-runtime' ? undefined : RUNTIME,
+      mode: { current: rebound && fault === 'mode-drift' ? 'build' : 'plan' } } }
 }
 function event(type, payload = {}) {
   out({ method: 'session/event', params: { sessionId: saved.id, seq: ++seq, type, payload } })
@@ -72,12 +80,12 @@ async function handle(frame) {
   }
   if (method === 'session/send') {
     await preferences()
-    // Mirrors the hypothesized native contract under test: a restored session
-    // refuses the continued send unless it carries the same runtimeModel, and
-    // still-guarded refuses even then. Verified against real ZCode separately.
-    const expectedRuntime = { providerId: 'private-provider', modelId: 'private-model' }
-    if (restored && (!rebound || fault === 'still-guarded' ||
-        JSON.stringify(params.runtimeModel) !== JSON.stringify(expectedRuntime))) { error(id); return }
+    // Mirrors the live-observed native contract: a restored session refuses
+    // every send until reselection is paired with the FULL published runtime
+    // descriptor; still-guarded refuses even that.
+    if (restored && (fault === 'still-guarded' || !rebound ||
+        JSON.stringify(params.runtimeModel) !== JSON.stringify(RUNTIME))) { error(id); return }
+    runtimeApplied = true
     const marker = params.content.match(/ZCODE_PROBE_[a-f0-9]+/)?.[0] || saved.messages.at(-1)?.parts[0].text
     if (!marker) { error(id, -32602); return }
     const turnId = `private-turn-${++saved.sends}`

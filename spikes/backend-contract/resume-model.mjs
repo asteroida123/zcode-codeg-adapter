@@ -12,6 +12,15 @@ export function modelReferenceFromSnapshot(snapshot) {
   return { providerId: ref.providerId, modelId: ref.modelId }
 }
 
+/** Relay ONLY a model runtime the native side itself published in a snapshot.
+ * The adapter never constructs provider definitions or auth material; if the
+ * native snapshot exposes none, the caller continues without one.
+ */
+export function modelRuntimeFromSnapshot(snapshot) {
+  const runtime = snapshot?.settings?.runtimeModel
+  return object(runtime) ? runtime : null
+}
+
 const same = (a, b) => a !== null && b !== null && a.providerId === b.providerId && a.modelId === b.modelId
 
 /** Opt-in same-model reselection experiment, NOT a general restore repair.
