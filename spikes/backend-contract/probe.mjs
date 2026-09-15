@@ -161,24 +161,47 @@ export async function runProbe(input, { signal, onLocalErrorFile = () => {} } = 
         // and - with explicit file opt-in - a cancel while an approval is
         // still pending. Stop is fire-and-forget; only a terminal event with
         // a cancellation result settles the verdict.
-        const result = await backend.prompt(id,
-          'Without tools or file access, write a long response counting integers from 1 to 10000, one per line.',
-          { timeoutMs: 60000, cancelOnStream: true })
+        report.cancelProgress = { stage: 'in-flight-cancel' }
+        let result
+        try {
+          result = await backend.prompt(id,
+            'Without tools or file access, write a long response counting integers from 1 to 10000, one per line.',
+            { timeoutMs: 60000, cancelOnStream: true, cancelTimeoutMs: 15000, closeOnCancelTimeout: false })
+        } catch (error) {
+          if (error.code !== 'E_CANCEL_UNCONFIRMED') throw error
+          // Discriminate "stop is a no-op" (still running) from "stop worked
+          // but the terminal event never arrived" (idle flips true). Polls a
+          // bounded 60s; read-only, no additional prompt.
+          const observations = []
+          for (let waited = 0; waited < 60000; waited += 2000) {
+            await new Promise(resolve => setTimeout(resolve, 2000))
+            const state = await backend.inspect(id, '').catch(e => ({ inspectError: e.code }))
+            observations.push({ at: waited + 2000, idle: state.idle === true, ...(/^E_/.test(String(state.inspectError ?? '')) ? { inspectError: state.inspectError } : {}) })
+            if (state.idle === true) break
+          }
+          report.cancelProgress.postStopPoll = observations
+          void backend.close()
+          throw error
+        }
+        report.cancelProgress.inFlightCancelled = result.cancelled === true
         const repeatedCancel = backend.cancel(id)
+        report.cancelProgress.stage = 'post-cancel-turn'
         const followup = await backend.prompt(id, 'Reply with exactly ZCODE_PROBE_deadbeef. Do not use tools or access files.', { timeoutMs: 60000 })
         const postCancelTurn = modelObservation(followup, await backend.inspect(id, 'ZCODE_PROBE_deadbeef'))
         const observed = {
           cancelTurn: { cancelled: result.cancelled, cancelSent: result.cancelSent,
+            stopAcknowledged: result.stopAcknowledged === true,
             terminalIdMatched: result.terminalIdMatched, streams: result.streams,
             repeatedCancelRejected: repeatedCancel === false },
           postCancelTurn }
         let pendingApproval
         if (options.allowFileTest) {
+          report.cancelProgress.stage = 'pending-approval-cancel'
           const guardBackend = start('hold')
           const guardId = await guardBackend.open(cwd, { mode: 'build' })
           const guardPrompt = guardBackend.prompt(guardId,
             'In this temporary test workspace only, attempt once to write the text TEST to deny-sentinel.txt. Do not use any other files or tools. If permission is denied or cancelled, stop; do not retry or find another way.',
-            { timeoutMs: 60000 })
+            { timeoutMs: 60000, cancelTimeoutMs: 15000 })
           await waitForHeldPermission(guardBackend, guardId)
           guardBackend.cancel(guardId)
           try {
@@ -189,6 +212,7 @@ export async function runProbe(input, { signal, onLocalErrorFile = () => {} } = 
             if (error.code !== 'E_CANCEL_UNCONFIRMED' && error.code !== 'E_TURN_FAILED') throw error
             pendingApproval = { cancelled: false, unconfirmed: true }
           }
+          report.cancelProgress.pendingApprovalSettled = pendingApproval.cancelled === true
           let sentinelAbsent = false
           try { await access(join(cwd, 'deny-sentinel.txt')) } catch (error) {
             if (error.code !== 'ENOENT') throw error
@@ -199,6 +223,7 @@ export async function runProbe(input, { signal, onLocalErrorFile = () => {} } = 
           if (!guardCleanup.closed) throw new ProbeError('E_CLEANUP')
         }
         if (pendingApproval) observed.pendingApprovalCancel = pendingApproval
+        report.cancelProgress.stage = 'complete'
         const pass = observed.cancelTurn.cancelled === true && observed.cancelTurn.terminalIdMatched === true &&
           observed.cancelTurn.repeatedCancelRejected === true &&
           followup.cancelled === false && postCancelTurn.terminalIdMatched === true &&
@@ -280,7 +305,7 @@ export async function runProbe(input, { signal, onLocalErrorFile = () => {} } = 
     report.checks.push({ name: phase, outcome: 'fail', error: diagnostic(error) })
     // Capture at failure time, before cleanup; no additional native requests.
     const backend = backends.at(-1)
-    if (backend) report.failureContext = { ...backend.rpc.diagnostics(), interactions: { ...backend.metrics } }
+    if (backend) report.failureContext = { ...backend.rpc.diagnostics(), ...backend.diagnostics(), interactions: { ...backend.metrics } }
   } finally {
     signal?.removeEventListener('abort', stop)
     for (const backend of backends) {

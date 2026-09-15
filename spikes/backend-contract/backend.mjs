@@ -33,6 +33,9 @@ export class AppServerBackend {
     this.heldPermissions = new Map()
     this.metrics = { preferences: 0, permissionsDenied: 0, unsupportedInteractions: 0,
       unknownNotifications: 0, staleEvents: 0, unknownEvents: 0 }
+    // Bounded wire vocabulary for failure diagnosis: type names and counts
+    // only, never payloads. Consistent with reverseRpcMethods in reports.
+    this.unknownEventTypes = new Map()
     this.rpc = new PrivateRpc({ ...options,
       onNotification: (method, params) => this.notification(method, params),
       onRequest: (method, params) => this.reverseRequest(method, params),
@@ -114,7 +117,7 @@ export class AppServerBackend {
     return rebindOriginalModel(this.rpc, id, original)
   }
 
-  prompt(id, content, { timeoutMs = 30000, cancelOnStream = false, cancelTimeoutMs = 3000, runtimeModel = null } = {}) {
+  prompt(id, content, { timeoutMs = 30000, cancelOnStream = false, cancelTimeoutMs = 3000, closeOnCancelTimeout = true, runtimeModel = null } = {}) {
     const state = this.state(id)
     if (state.active) return Promise.reject(new ProbeError('E_BUSY'))
     if (this.rpc.failure || this.rpc.closing) return Promise.reject(new ProbeError('E_CLOSED'))
@@ -128,7 +131,7 @@ export class AppServerBackend {
     }
     return new Promise((resolve, reject) => {
       const turn = { accepted: false, started: false, turnId: null, terminal: null, cancelSent: false,
-        streams: 0, tools: 0, denied: 0, cancelOnStream, cancelTimeoutMs,
+        streams: 0, tools: 0, denied: 0, cancelOnStream, cancelTimeoutMs, closeOnCancelTimeout,
         startCount: 0, firstStartIdentity: null,
         timer: null, cancelTimer: null, settled: false, finish: null }
       turn.finish = (error, result) => {
@@ -171,6 +174,7 @@ export class AppServerBackend {
     const terminalIdMatched = turn.turnId !== null && terminalIdentity.id === turn.turnId
     turn.finish(null, { streams: turn.streams, tools: turn.tools, denied: turn.denied,
       turnIdObserved: turn.turnId !== null, terminalIdMatched, cancelSent: turn.cancelSent,
+      stopAcknowledged: turn.stopAcknowledged === true,
       cancelled, terminalObserved: true, turnCorrelation: terminalIdMatched ? `matched-${terminalIdentity.source}-turn-id` : 'unverified',
       identityEvidence: { startCount: turn.startCount,
         firstStart: turn.firstStartIdentity, terminal: identityShape(turn.terminal) } })
@@ -180,14 +184,20 @@ export class AppServerBackend {
     const turn = this.state(id).active
     if (!turn || turn.settled || turn.cancelSent) return false
     turn.cancelSent = true
-    this.rpc.notify('session/stop', { sessionId: id })
-    // Stop is fire-and-forget: the proof of cancellation stays the terminal
-    // event. Held permissions are settled so a pending approval cannot block
-    // the backend from observing or emitting that terminal.
+    // Live 0.16.5 evidence: the notification form of session/stop left an
+    // in-flight turn unsettled for 15s. The handler is request-shaped, so send
+    // it with an id and record the acknowledgement. The acknowledgement is
+    // evidence only - the verdict still belongs to a correlated terminal.
+    void this.rpc.request('session/stop', { sessionId: id }, { timeoutMs: 5000 })
+      .then(() => { turn.stopAcknowledged = true }, () => { turn.stopAcknowledged = false })
+    // Held permissions are settled so a pending approval cannot block the
+    // backend from observing or emitting the terminal.
     flushPermissions(this.heldPermissions, this.metrics, id)
     turn.cancelTimer = setTimeout(() => {
       turn.finish(new ProbeError('E_CANCEL_UNCONFIRMED'))
-      void this.close()
+      // Outcome is unknown; poisoning stays the default so no caller replays
+      // a prompt over an ambiguous transport. Read-only diagnostics may opt out.
+      if (turn.closeOnCancelTimeout) void this.close()
     }, turn.cancelTimeoutMs)
     return true
   }
@@ -227,7 +237,16 @@ export class AppServerBackend {
       this.complete(turn)
     } else {
       this.metrics.unknownEvents++
+      if (!this.unknownEventTypes.has(params.type) && this.unknownEventTypes.size < 16) {
+        this.unknownEventTypes.set(params.type, 0)
+      }
+      if (this.unknownEventTypes.has(params.type)) this.unknownEventTypes.set(params.type, this.unknownEventTypes.get(params.type) + 1)
     }
+  }
+
+  /** Wire vocabulary diagnostics for failure reports. Type names only. */
+  diagnostics() {
+    return { unknownEventTypes: [...this.unknownEventTypes].map(([type, count]) => ({ type, count })) }
   }
 
   reverseRequest(method, params) {
