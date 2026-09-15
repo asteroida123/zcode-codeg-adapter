@@ -32,6 +32,22 @@ smoke 的 observed 新增：
 **不表示两个值相等、也不证明该位置属于稳定协议**。不输出 ID、长度、哈希、
 输入文本、工具内容、配置或任意原生字段名。
 
+## 2026-09-15 本机真实运行的身份形态（T2 输入）
+
+两次授权真实 resume 实验（CLI 0.16.5，本机直接执行）中，第一轮回答均成立
+（responseMarkerMatched=true、结束后 idle），`identityEvidence` 稳定显示：
+
+- `turn.started`：envelopeTurnId=string、foregroundExecutionId=string、
+  payloadTurnId=absent。
+- 终止事件：envelopeTurnId=string、payloadTurnId=absent、
+  foregroundExecutionId=absent。
+
+即真实 CLI 把回合身份放在**事件信封顶层 turnId**（`turn.started` 另有
+foregroundExecutionId，终止事件没有），而当前实现只检查 `payload.turnId`——
+这就是 `terminalIdMatched=false` 的直接解释，也是 T2 归一化的明确方向：先在
+更多场景（取消、连续提示、双会话、迟到终止）验证信封 turnId 在 start/terminal
+之间的匹配规则，再升级判定，不放宽旧断言。目前为单一会话两次运行的样本。
+
 resume 的 observed 保留 historyRetained、secondTurnRetainedContext，同时增加
 firstTurn / continuedTurn 的上述证据。第二次请求不会再次提供第一轮随机标记。
 这使一次恢复验证同时检查历史、后端上下文及两轮事件形态，不必再单独重复 smoke。
@@ -52,9 +68,11 @@ node scripts/probe-zcode.mjs --live --zcode "/Applications/ZCode.app/Contents/Re
 ```
 
 会发送两次模型提示，可能消耗所选账户额度。使用新的临时工作区和测试会话；
-仍不是 OS 沙箱，原生配置、工具/MCP 的初始化副作用不变。不要加 --local-error，
-不要上传原生日志或配置；只需提供 JSON 摘要。如果再次 inconclusive，分别查看
-historyRetained、secondTurnRetainedContext 和两轮 identityEvidence。
+仍不是 OS 沙箱，原生配置、工具/MCP 的初始化副作用不变。如需区分 -32031 的
+具体抛出点，可加 `--local-error`（显式开启，仅本机 0600 临时文件，已支持
+resume 场景）；不要上传原生日志或配置，对外只提供 JSON 摘要。如果再次
+inconclusive，分别查看 historyRetained、secondTurnRetainedContext 和两轮
+identityEvidence。
 
 后续若要支持没有 payload.turnId 的构建，必须先证实替代关联规则，再用迟到终止、
 后台回合、重复事件、订阅积压、并发和取消竞争等回归验证它。此次没有启用猜测回退。

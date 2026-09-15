@@ -1,5 +1,41 @@
 # 恢复历史不等于恢复可推理状态
 
+## 2026-09-15 两次授权真实实验的结论（本机直接执行，CLI 0.16.5）
+
+前置：实验前发现 `~/.zcode/cli/config.json` 丢失（setup 工具检查确认），由用户
+手动重新执行 `setup-zcode-cli.mjs --apply` 恢复后实验才可运行。
+
+**运行 1（重选 + 续聊 send 不带 runtimeModel）**：第一轮回答成立（12 条流、
+标记匹配、idle）→ 关闭进程 → resume 接受、历史保留 → `session/setModel`
+重选原模型验证通过（选回同一 provider/model、plan、idle）→ 续聊 send 仍
+`-32031`，本机原文即恢复警告文本。当时 `restoreWarningBeforeSend` 读到 null
+是**假阴性**（我们读的是响应顶层，真实位置是 `projection.lastError`）。
+
+**运行 2（修正读取位置后）**：`restoreWarningBeforeSend` 正确读到
+`runtime-model-unavailable`——证明 **setModel 重选成功也不清除运行时守卫**。
+续聊 send 携带 `{providerId, modelId}` 形态的 runtimeModel 被原生以 `-32602`
+拒绝，zod 反馈给出权威 schema：`runtimeModel` 必须是
+`{revision: string, generatedAt: number, model: object, provider: object,
+thoughtLevel?: string}`（strict）——即完整运行时定义，不是选择引用。
+
+**根因结论（有证据）**：-32031 = cold resume 时会话存储模型无法在当前目录
+解析 → `projection.lastError` 出现恢复警告 → `session/send` 在警告未清时拒绝。
+解除需要桌面 App 角色提供完整运行时定义，原生通道为：`session/create` /
+`session/resume` / `session/send` 的 `runtimeModel` 参数，以及
+`workspace/updateProviderRegistry`（推送 `{revision, generatedAt, providers[]}`
+注册表，含 applied/unchanged/failed 与过期快照保护）。桌面 App 是凭据持有者；
+`interaction/requestOfficialMcpAuthHeaders` 反向请求被拒时原生会优雅降级为
+`official_auth_unavailable`（官方 MCP 专用），不是本阻塞的根因。
+
+**边界规则（已实现）**：探测/适配器只回传原生快照自己在 `settings.runtimeModel`
+发布过的描述符（0.16.5 不发布），绝不自行构造 provider 定义或读取配置凭据。
+因此真实环境恢复后的续聊在 T4 适配器提供合法配置来源之前**保持失败并记录
+证据**，不伪装通过。
+
+对 T2 的额外输入：两次运行中 `turn.started` 的身份在信封顶层 turnId +
+foregroundExecutionId，payload.turnId 缺席；终止事件只有信封 turnId。
+详见 docs/TURN-EVIDENCE.md。
+
 ## 本机 CLI 0.16.5 包内证据（2026-09-15 本地只读检查）
 
 对本机安装的 `zcode.cjs`（0.16.5，与 `EXPECTED_CLI` 一致）做只读字符串检查，
@@ -26,15 +62,17 @@
 
 ## 已实现的窄诊断（本轮）
 
-- `inspect()` 现在返回 `restoreWarning`，仅取分类：`runtime-model-unavailable` /
-  `unclassified` / `null`；原文与符号不进入报告。
+- `inspect()` 返回 `restoreWarning`，从 `projection.lastError` 分类：
+  `runtime-model-unavailable` / `unclassified` / `null`；原文与符号不进报告。
 - resume 场景在续聊 send 前记录 `resumeProgress.restoreWarningBeforeSend`
-  （`resumeEvidenceRevision: 2`）。重选成功后应为 `null`；守卫仍在时保持分类值，
-  不得视为已修复。
-- `--local-error` 覆盖范围扩到 `session/resume` 与 `session/send`（仍然一次性、
-  有界、仅本地 0600 文件、明确开启），并允许与 `--rebind-resume-model` 组合：
-  若重选后仍 `-32031`，本机原文可区分恢复守卫与 provider runtime 头两种抛出点。
-  `--local-error --scenario resume` 必须搭配 `--live --allow-model`；仍不得与
+  （`resumeEvidenceRevision: 2`）。守卫仍在时保持分类值，不得视为已修复。
+- `prompt()` 支持显式 `runtimeModel` 透传；resume 场景只回传原生快照发布的
+  `settings.runtimeModel`（`runtimeModelRelayed` 记录是否发生）。探测与适配器
+  不构造 provider 定义、不读取配置或凭据。
+- `--local-error` 覆盖 `session/resume` 与 `session/send`（一次性、有界、仅本地
+  0600 文件、明确开启），可与 `--rebind-resume-model` 组合：本机原文可区分
+  恢复守卫、schema 拒绝与 provider runtime 头等抛出点。`--local-error
+  --scenario resume` 必须搭配 `--live --allow-model`；仍不得与
   `--allow-file-test` 或 session 场景的 `--allow-model` 组合。
 
 ## 本轮证据（历史）
@@ -71,12 +109,14 @@ runtime headers 的失败——本机包内确认该抛出点真实存在。
 node scripts/probe-zcode.mjs --live --zcode "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs" --allow-model --scenario resume --rebind-resume-model
 ```
 
-这是一个**候选修复实验，不是已确认适用于真实 ZCode 的修复**。它通过原生
-`session/setModel` 重新选择同一个模型，不伪造模型可用性，不清除原生 guard。
-原生后端仍负责校验模型、provider 和认证。仅靠模型引用可能不足以重建 runtime；
-此时错误保持失败，后续需要明确评审其他方案，而不是追加自动 fallback。
-本机包内证据（警告文本、应用 runtime 清警告、快照 `lastError` 可读）支持该接缝，
-但真实解除仍以 `secondTurnRetainedContext: true` 为准。
+这是一个**已被真实实验证伪为独立修复的实验**：setModel 重选原模型可以验证
+通过，但真实 CLI 0.16.5 中它不清除运行时守卫，续聊 send 仍以 -32031 拒绝
+（见顶部两次运行的结论）。它仍有价值：确认选择/plan/idle 的读回契约，并与
+runtimeModel 中继组合成完整解除路径。真正的解除需要以桌面 App 角色提供完整
+运行时定义（原生 `runtimeModel` 参数或 `workspace/updateProviderRegistry`），
+这是 T4 适配器核心“必要的配置选择”的交付范围；本机包内证据（警告文本、应用
+runtime 清警告、快照 `lastError` 可读）支持该接缝，真实解除以
+`secondTurnRetainedContext: true` 为准。
 
 执行顺序（重选分支）：第一轮回答并读取快照 → 保留原生 provider/model 引用（仅内存）→
 关闭进程并恢复同一会话 → 核对历史 → 核对原模型和 plan 模式、确认状态 idle →
