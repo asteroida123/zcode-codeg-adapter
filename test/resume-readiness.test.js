@@ -33,12 +33,16 @@ test('Resume: original selection is extracted without copying provider secrets',
 })
 
 for (const args of [[], ['--mock'], ['--live'], ['--live', '--allow-model', '--scenario', 'smoke'],
-  ['--live', '--scenario', 'resume'], ['--live', '--allow-model', '--allow-file-test', '--scenario', 'resume'],
-  ['--live', '--allow-model', '--local-error', '--scenario', 'resume']]) {
+  ['--live', '--scenario', 'resume'], ['--live', '--allow-model', '--allow-file-test', '--scenario', 'resume']]) {
   test(`Resume: rebind scope rejects ${JSON.stringify(args)}`, () => {
     assert.throws(() => parseArgs([...args, '--rebind-resume-model']), hasCode('E_REBIND_SCOPE'))
   })
 }
+test('Resume: rebind may combine with opt-in local error capture', () => {
+  const options = parseArgs(['--live', '--allow-model', '--local-error', '--scenario', 'resume', '--rebind-resume-model'])
+  assert.equal(options.localError, true)
+  assert.equal(options.rebindResumeModel, true)
+})
 test('Resume: programmatic callers cannot bypass opt-in or scope', async () => {
   assert.throws(() => validateOptions({ live: true, scenario: 'resume', allowModel: true, rebindResumeModel: 'true' }), hasCode('E_ARGS'))
   const subject = Object.create(AppServerBackend.prototype)
@@ -91,7 +95,17 @@ test('Resume: baseline failure preserves first answer and restored history, with
   assert.equal(report.resumeProgress.modelRebind, undefined)
   assert.equal(report.resumeProgress.secondTurnRetainedContext, undefined)
   assert.ok(!report.failureContext.completedRpcMethods.includes('session/setModel'))
+  assert.deepEqual(report.checks.at(-1).error.remoteHints, ['runtime-model-unavailable'])
   assert.deepEqual(report.cleanup, { workspaceRemoved: true, processesClosed: true })
+})
+
+test('Resume: guarded restore surfaces the native warning before the paid send', async t => {
+  const report = await probe(t)
+  assert.equal(report.resumeEvidenceRevision, 2)
+  assert.equal(report.resumeProgress.restoreWarningBeforeSend, 'runtime-model-unavailable')
+  for (const raw of ['ZCODE_RUNTIME_MODEL_UNAVAILABLE', '历史任务使用的模型已不可用']) {
+    assert.ok(!JSON.stringify(report).includes(raw))
+  }
 })
 
 test('Resume: opt-in reselection permits continued response in the synthetic guarded backend', async t => {
@@ -101,9 +115,11 @@ test('Resume: opt-in reselection permits continued response in the synthetic gua
   assert.equal(report.resumeProgress.modelRebind.originalSelectionRetained, true)
   assert.equal(report.resumeProgress.modelRebind.planModeRetained, true)
   assert.equal(report.resumeProgress.historyRetainedAfterRebind, true)
+  assert.equal(report.resumeProgress.restoreWarningBeforeSend, null)
   assert.equal(report.resumeProgress.secondTurnRetainedContext, true)
   assert.equal(report.resumeProgress.stage, 'complete')
-  for (const privateText of ['private-provider', 'private-model', 'sess-private', 'ZCODE_PROBE_', 'SYNTHETIC-SECRET']) {
+  for (const privateText of ['private-provider', 'private-model', 'sess-private', 'ZCODE_PROBE_', 'SYNTHETIC-SECRET',
+    'ZCODE_RUNTIME_MODEL_UNAVAILABLE', '历史任务使用的模型已不可用']) {
     assert.ok(!JSON.stringify(report).includes(privateText))
   }
 })
@@ -136,6 +152,8 @@ for (const [fault, errorCode, stage] of [
     assert.equal(report.resumeProgress.firstTurn.responseMarkerMatched, true)
     assert.notEqual(report.resumeProgress.secondTurnRetainedContext, true)
     if (fault === 'rebind-rejected') assert.equal(report.checks.at(-1).error.rpcMethod, 'session/setModel')
+    // A guard that survives reselection is reported, never silently cleared.
+    if (fault === 'still-guarded') assert.equal(report.resumeProgress.restoreWarningBeforeSend, 'runtime-model-unavailable')
     assert.deepEqual(report.cleanup, { workspaceRemoved: true, processesClosed: true })
   })
 }

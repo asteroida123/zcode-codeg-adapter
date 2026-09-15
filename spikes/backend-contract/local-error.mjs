@@ -3,7 +3,10 @@ import { tmpdir } from 'node:os'
 import { join, relative, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const METHODS = new Set(['session/create', 'session/subscribe', 'session/read', 'session/messages'])
+// Resume-path coverage: a restored session can be rejected at resume itself or
+// at the first post-resume send (-32031). Both stay first-error-only captures.
+const METHODS = new Set(['session/create', 'session/subscribe', 'session/read', 'session/messages',
+  'session/resume', 'session/send'])
 const FIELDS = ['cause', 'error', 'data', 'detail', 'details', 'issues']
 const repository = fileURLToPath(new URL('../../', import.meta.url))
 const inside = (root, path) => {

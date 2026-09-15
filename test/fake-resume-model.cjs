@@ -29,8 +29,12 @@ function snapshot() {
   let model = { providerId: 'private-provider', modelId: 'private-model' }
   if (fault === 'missing-reference' || (restored && fault === 'missing-restored-reference')) model = { modelId: 'private-model' }
   if ((restored && fault === 'pre-rebind-drift') || (rebound && fault === 'post-rebind-drift')) model.modelId = 'other-model'
+  // Mirrors the observed native layout: a blocked restore exposes a lastError
+  // object until a model runtime is applied again (still-guarded keeps it).
+  const guarded = restored && (!rebound || fault === 'still-guarded')
   return { projection: { status: fault === 'busy' && restored ? 'running' : 'idle' },
-    settings: { model: { current: model }, mode: { current: rebound && fault === 'mode-drift' ? 'build' : 'plan' } } }
+    settings: { model: { current: model }, mode: { current: rebound && fault === 'mode-drift' ? 'build' : 'plan' } },
+    ...(guarded ? { lastError: { message: '历史任务使用的模型已不可用', type: 'ZCODE_RUNTIME_MODEL_UNAVAILABLE' } } : {}) }
 }
 function event(type, payload = {}) {
   out({ method: 'session/event', params: { sessionId: saved.id, seq: ++seq, type, payload } })

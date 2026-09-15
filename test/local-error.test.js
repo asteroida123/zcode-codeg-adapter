@@ -97,11 +97,27 @@ test('Local diagnostics: private temporary output inside the checkout is rejecte
 test('Local diagnostics: explicit live session scope is enforced by CLI and programmatic entry', async () => {
   for (const args of [ ['--local-error'], ['--live', '--local-error'],
     ['--live', '--allow-model', '--scenario', 'smoke', '--local-error'],
-    ['--live', '--allow-model', '--scenario', 'session', '--local-error'] ]) {
+    ['--live', '--allow-model', '--scenario', 'session', '--local-error'],
+    ['--live', '--allow-model', '--allow-file-test', '--scenario', 'resume', '--local-error'] ]) {
     assert.throws(() => parseArgs(args), error => error.code === 'E_LOCAL_ERROR_SCOPE')
   }
+  const allowed = parseArgs(['--live', '--allow-model', '--scenario', 'resume', '--local-error'])
+  assert.equal(allowed.localError, true)
   await assert.rejects(runProbe({ live: false, scenario: 'all', localError: true }), error => error.code === 'E_LOCAL_ERROR_SCOPE')
   await assert.rejects(runProbe({ live: true, scenario: 'session', localError: 'yes' }), error => error.code === 'E_ARGS')
+})
+
+test('Local diagnostics: resumed-session send failures are capturable, first error only', async t => {
+  const sink = new LocalErrorCapture()
+  sink.capture('session/send', { code: -32031, message: `guard ${secret}` })
+  assert.ok(sink.path)
+  clean(t, sink.path)
+  const saved = JSON.parse(await readFile(sink.path, 'utf8'))
+  assert.equal(saved.rpcMethod, 'session/send')
+  assert.equal(saved.rpcCode, -32031)
+  sink.capture('session/resume', { code: -32004, message: 'must not overwrite' })
+  assert.equal(await readFile(sink.path, 'utf8'), JSON.stringify(saved, null, 2) + '\n')
+  assert.ok(!JSON.stringify(sink.status()).includes(secret))
 })
 
 test('Local diagnostics: default failure still produces no private capture', async t => {

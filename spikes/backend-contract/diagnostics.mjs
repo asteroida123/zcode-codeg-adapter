@@ -78,6 +78,17 @@ export function remoteIndicators(error) {
   return { remoteMessagePresent: messagePresent, remoteHints: [...hints].sort() }
 }
 
+/** Classification-only view of a native restore warning, readable from a
+ * session snapshot before any prompt is sent. An unexpected layout or unknown
+ * warning stays unnamed; raw warning text never returns.
+ */
+export function restoreWarningIndicator(value) {
+  if (value === undefined || value === null) return null
+  if (!object(value)) return 'unclassified'
+  return remoteIndicators(value).remoteHints.includes('runtime-model-unavailable')
+    ? 'runtime-model-unavailable' : 'unclassified'
+}
+
 /** Revalidate at both construction and serialization; callers cannot add raw data. */
 export function safeDetails(value) {
   if (!object(value)) return {}

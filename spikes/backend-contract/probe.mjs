@@ -42,9 +42,10 @@ export function validateOptions(options) {
   options.scenario ??= options.live ? 'inspect' : 'all'
   if (!scenarios.includes(options.scenario) || (!options.live && options.zcode)) throw new ProbeError('E_ARGS')
   if (options.rebindResumeModel !== undefined && typeof options.rebindResumeModel !== 'boolean') throw new ProbeError('E_ARGS')
-  if (options.rebindResumeModel && (!options.live || options.scenario !== 'resume' || options.allowModel !== true || options.localError || options.allowFileTest)) throw new ProbeError('E_REBIND_SCOPE')
+  if (options.rebindResumeModel && (!options.live || options.scenario !== 'resume' || options.allowModel !== true || options.allowFileTest)) throw new ProbeError('E_REBIND_SCOPE')
   if (options.localError !== undefined && typeof options.localError !== 'boolean') throw new ProbeError('E_ARGS')
-  if (options.localError && (!options.live || options.scenario !== 'session' || options.allowModel || options.allowFileTest)) throw new ProbeError('E_LOCAL_ERROR_SCOPE')
+  if (options.localError && (!options.live || !['session', 'resume'].includes(options.scenario) || options.allowFileTest)) throw new ProbeError('E_LOCAL_ERROR_SCOPE')
+  if (options.localError && options.scenario === 'session' && options.allowModel) throw new ProbeError('E_LOCAL_ERROR_SCOPE')
   if (options.live && options.scenario === 'all') throw new ProbeError('E_ARGS')
   if (options.live && !['inspect', 'session'].includes(options.scenario) && options.allowModel !== true) throw new ProbeError('E_MODEL_OPT_IN')
   if (options.live && options.scenario === 'deny' && options.allowFileTest !== true) throw new ProbeError('E_FILE_OPT_IN')
@@ -126,7 +127,7 @@ export async function runProbe(input, { signal, onLocalErrorFile = () => {} } = 
       if (scenario === 'inspect') continue
       phase = scenario
       if (scenario === 'resume') {
-        report.resumeEvidenceRevision = 1
+        report.resumeEvidenceRevision = 2
         report.resumeProgress = { stage: 'first-turn', rebindRequested: options.rebindResumeModel === true }
       }
       let backend = start()
@@ -175,6 +176,7 @@ export async function runProbe(input, { signal, onLocalErrorFile = () => {} } = 
           const restored = await backend.inspect(id, marker)
           if (restored.assistantMessages !== before.assistantMessages || !restored.lastAssistantHasMarker) throw new ProbeError('E_HISTORY')
           progress.historyRetained = true
+          let preSend = restored
           if (options.rebindResumeModel) {
             progress.stage = 'rebind-original-model'
             progress.modelRebind = { attempted: true, verified: false }
@@ -183,8 +185,13 @@ export async function runProbe(input, { signal, onLocalErrorFile = () => {} } = 
             const checked = await backend.inspect(id, marker)
             if (checked.assistantMessages !== before.assistantMessages || !checked.lastAssistantHasMarker) throw new ProbeError('E_HISTORY')
             progress.historyRetainedAfterRebind = true
+            preSend = checked
           }
           progress.stage = 'continued-send'
+          // The native restore warning is observable from a snapshot before any
+          // prompt is sent. Recording it ties a -32031 send rejection to the
+          // native guard without spending a turn on the attempt.
+          progress.restoreWarningBeforeSend = preSend.restoreWarning
           const continued = await backend.prompt(id, 'Reply with exactly the token you replied with earlier. Do not use tools or access files.', { timeoutMs: 60000 })
           progress.stage = 'verify-continued-history'
           const after = await backend.inspect(id, marker)

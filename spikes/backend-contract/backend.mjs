@@ -3,6 +3,7 @@ import { PrivateRpc } from './rpc.mjs'
 import { ProbeError, object } from './errors.mjs'
 import { identityShape } from './turn-evidence.mjs'
 import { modelReferenceFromSnapshot, rebindOriginalModel } from './resume-model.mjs'
+import { restoreWarningIndicator } from './diagnostics.mjs'
 
 export const PROFILE = 'app-server-cli-0.16.5-candidate'
 export const EXPECTED_CLI = '0.16.5'
@@ -69,7 +70,8 @@ export class AppServerBackend {
     // Only return measurements. Never return model text or native IDs in reports.
     return { messageCount: history.messages.length, assistantMessages: assistant.length,
       lastAssistantHasMarker: marker.length > 0 && text.includes(marker),
-      idle: state.projection.status === 'idle' }
+      idle: state.projection.status === 'idle',
+      restoreWarning: restoreWarningIndicator(state.lastError) }
   }
 
   originalModelReference(id) {
