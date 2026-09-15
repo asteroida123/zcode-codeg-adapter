@@ -24,6 +24,7 @@ export function parseArgs(argv) {
     else if (key === '--mock') options.mock = true
     else if (key === '--allow-model') options.allowModel = true
     else if (key === '--allow-file-test') options.allowFileTest = true
+    else if (key === '--rebind-resume-model') options.rebindResumeModel = true
     else if (key === '--local-error') options.localError = true
     else if (key === '--help') options.help = true
     else if (['--zcode', '--scenario', '--out'].includes(key)) {
@@ -40,6 +41,8 @@ export function validateOptions(options) {
   if (options.live && options.mock) throw new ProbeError('E_ARGS')
   options.scenario ??= options.live ? 'inspect' : 'all'
   if (!scenarios.includes(options.scenario) || (!options.live && options.zcode)) throw new ProbeError('E_ARGS')
+  if (options.rebindResumeModel !== undefined && typeof options.rebindResumeModel !== 'boolean') throw new ProbeError('E_ARGS')
+  if (options.rebindResumeModel && (!options.live || options.scenario !== 'resume' || options.allowModel !== true || options.localError || options.allowFileTest)) throw new ProbeError('E_REBIND_SCOPE')
   if (options.localError !== undefined && typeof options.localError !== 'boolean') throw new ProbeError('E_ARGS')
   if (options.localError && (!options.live || options.scenario !== 'session' || options.allowModel || options.allowFileTest)) throw new ProbeError('E_LOCAL_ERROR_SCOPE')
   if (options.live && options.scenario === 'all') throw new ProbeError('E_ARGS')
@@ -122,6 +125,10 @@ export async function runProbe(input, { signal, onLocalErrorFile = () => {} } = 
     for (const scenario of selected) {
       if (scenario === 'inspect') continue
       phase = scenario
+      if (scenario === 'resume') {
+        report.resumeEvidenceRevision = 1
+        report.resumeProgress = { stage: 'first-turn', rebindRequested: options.rebindResumeModel === true }
+      }
       let backend = start()
       const id = await backend.open(cwd, { mode: scenario === 'deny' ? 'build' : 'plan' })
       if (scenario === 'session') {
@@ -150,15 +157,41 @@ export async function runProbe(input, { signal, onLocalErrorFile = () => {} } = 
         const before = await backend.inspect(id, marker)
         if (!result.streams || !before.lastAssistantHasMarker) throw new ProbeError('E_MODEL_EXPECTATION')
         if (scenario === 'resume') {
+          const progress = report.resumeProgress
+          progress.firstTurn = modelObservation(result, before)
+          progress.stage = 'capture-original-model'
+          // Read only the reference already observed in the native snapshot.
+          // Never read desktop/CLI config or carry provider credentials here.
+          const originalModel = options.rebindResumeModel ? backend.originalModelReference(id) : null
+          progress.stage = 'close-first-process'
           const cleanup = await backend.close()
           if (!cleanup.closed) throw new ProbeError('E_CLEANUP')
+          progress.firstProcessClosed = true
+          progress.stage = 'native-resume'
           backend = start() // A genuinely different OS process, same native session.
           await backend.open(cwd, { sessionId: id })
+          progress.nativeResumeAccepted = true
+          progress.stage = 'read-restored-history'
           const restored = await backend.inspect(id, marker)
           if (restored.assistantMessages !== before.assistantMessages || !restored.lastAssistantHasMarker) throw new ProbeError('E_HISTORY')
+          progress.historyRetained = true
+          if (options.rebindResumeModel) {
+            progress.stage = 'rebind-original-model'
+            progress.modelRebind = { attempted: true, verified: false }
+            progress.modelRebind = await backend.rebindResumedModel(id, originalModel, { allowRebind: true })
+            // Rebinding must not replace, clear or duplicate the restored history.
+            const checked = await backend.inspect(id, marker)
+            if (checked.assistantMessages !== before.assistantMessages || !checked.lastAssistantHasMarker) throw new ProbeError('E_HISTORY')
+            progress.historyRetainedAfterRebind = true
+          }
+          progress.stage = 'continued-send'
           const continued = await backend.prompt(id, 'Reply with exactly the token you replied with earlier. Do not use tools or access files.', { timeoutMs: 60000 })
+          progress.stage = 'verify-continued-history'
           const after = await backend.inspect(id, marker)
+          progress.continuedTurn = modelObservation(continued, after)
           if (after.assistantMessages <= before.assistantMessages || !after.lastAssistantHasMarker) throw new ProbeError('E_HISTORY')
+          progress.secondTurnRetainedContext = true
+          progress.stage = 'complete'
           const outcome = result.terminalIdMatched && continued.terminalIdMatched ? 'pass' : 'inconclusive'
           report.checks.push({ name: scenario, outcome, observed: { historyRetained: true, secondTurnRetainedContext: true,
             firstTurn: modelObservation(result, before), continuedTurn: modelObservation(continued, after) } })

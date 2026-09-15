@@ -3,7 +3,7 @@ const object = value => value !== null && typeof value === 'object' && !Array.is
 // Only locally known operation names can enter a report, never arbitrary wire names.
 export const RPC_METHODS = new Set([
   'session/create', 'session/resume', 'session/subscribe',
-  'session/read', 'session/messages', 'session/send', 'session/stop',
+  'session/read', 'session/messages', 'session/send', 'session/stop', 'session/setModel',
 ])
 export const REVERSE_METHODS = new Set([
   'session/requestRuntimePreferences', 'interaction/requestPermission',
@@ -11,10 +11,11 @@ export const REVERSE_METHODS = new Set([
   'interaction/requestOfficialMcpAuthHeaders',
 ])
 export const REMOTE_HINTS = new Set([
-  'model-configuration', 'authentication', 'filesystem-access',
+  'model-configuration', 'runtime-model-unavailable', 'authentication', 'filesystem-access',
   'file-missing', 'runtime-dependency', 'state-store', 'request-schema', 'network',
 ])
 const SYMBOLS = new Map([
+  ['ZCODE_RUNTIME_MODEL_UNAVAILABLE', 'runtime-model-unavailable'],
   ['MISSING_CREDENTIAL', 'authentication'], ['AUTH_REQUIRED', 'authentication'],
   ['UNAUTHENTICATED', 'authentication'], ['INVALID_API_KEY', 'authentication'],
   ['MODEL_NOT_FOUND', 'model-configuration'], ['PROVIDER_NOT_FOUND', 'model-configuration'],
@@ -28,6 +29,7 @@ const SYMBOLS = new Map([
   ['ECONNREFUSED', 'network'], ['ENOTFOUND', 'network'], ['ETIMEDOUT', 'network'],
 ])
 const PATTERNS = [
+  ['runtime-model-unavailable', /\bZCODE_RUNTIME_MODEL_UNAVAILABLE\b|历史任务使用的模型已不可用/],
   ['model-configuration', /\b(?:no|missing|unknown|unconfigured) (?:default )?(?:model|provider)\b|\b(?:model|provider)(?: config(?:uration)?)? (?:is )?(?:not (?:found|configured|set)|missing)\b|\bmodel\.main\b/i],
   ['authentication', /\b(?:authentication (?:required|failed)|not (?:logged|signed) in|invalid (?:api key|token)|(?:missing|expired|invalid) credentials?|credential(?:s)? (?:not found|missing|expired)|api key (?:is )?(?:missing|required|invalid))\b/i],
   ['filesystem-access', /\b(?:EACCES|EPERM|permission denied|operation not permitted)\b/i],
@@ -64,7 +66,7 @@ export function remoteIndicators(error) {
       const text = value.message.slice(0, 2048)
       for (const [hint, pattern] of PATTERNS) if (pattern.test(text)) hints.add(hint)
     }
-    for (const key of ['code', 'name']) {
+    for (const key of ['code', 'name', 'type']) {
       const hint = typeof value[key] === 'string' ? SYMBOLS.get(value[key]) : undefined
       if (hint) hints.add(hint)
     }

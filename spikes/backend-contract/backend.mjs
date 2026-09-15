@@ -2,6 +2,7 @@ import { realpath } from 'node:fs/promises'
 import { PrivateRpc } from './rpc.mjs'
 import { ProbeError, object } from './errors.mjs'
 import { identityShape } from './turn-evidence.mjs'
+import { modelReferenceFromSnapshot, rebindOriginalModel } from './resume-model.mjs'
 
 export const PROFILE = 'app-server-cli-0.16.5-candidate'
 export const EXPECTED_CLI = '0.16.5'
@@ -35,7 +36,7 @@ export class AppServerBackend {
     if (returnedCwd !== undefined && (!idValue(returnedCwd) || await realpath(returnedCwd) !== canonical)) {
       throw new ProbeError('E_WORKSPACE')
     }
-    const state = { cwd: canonical, lastSeq: -1, active: null, ready: false, finished: new Set() }
+    const state = { cwd: canonical, resumed: Boolean(sessionId), modelRebindAttempted: false, modelReference: null, lastSeq: -1, active: null, ready: false, finished: new Set() }
     this.sessions.set(id, state)
     try {
       // Attach state before subscribing: subscribe may emit its backlog before
@@ -62,12 +63,28 @@ export class AppServerBackend {
     const state = await this.rpc.request('session/read', { sessionId: id })
     const history = await this.rpc.request('session/messages', { sessionId: id })
     if (!object(state?.projection) || !Array.isArray(history?.messages)) throw new ProbeError('E_SCHEMA')
+    this.state(id).modelReference = modelReferenceFromSnapshot(state)
     const assistant = history.messages.filter(message => message?.info?.role === 'assistant')
     const text = assistant.at(-1)?.parts?.filter(part => part.type === 'text').map(part => part.text ?? '').join('') ?? ''
     // Only return measurements. Never return model text or native IDs in reports.
     return { messageCount: history.messages.length, assistantMessages: assistant.length,
       lastAssistantHasMarker: marker.length > 0 && text.includes(marker),
       idle: state.projection.status === 'idle' }
+  }
+
+  originalModelReference(id) {
+    const ref = this.state(id).modelReference
+    if (!ref) throw new ProbeError('E_RESUME_MODEL_REFERENCE')
+    return { ...ref }
+  }
+
+  async rebindResumedModel(id, original, { allowRebind = false } = {}) {
+    const state = this.state(id)
+    if (allowRebind !== true || !state.resumed) throw new ProbeError('E_REBIND_SCOPE')
+    if (state.active) throw new ProbeError('E_BUSY')
+    if (state.modelRebindAttempted) throw new ProbeError('E_REBIND_ALREADY_ATTEMPTED')
+    state.modelRebindAttempted = true
+    return rebindOriginalModel(this.rpc, id, original)
   }
 
   prompt(id, content, { timeoutMs = 30000, cancelOnStream = false, cancelTimeoutMs = 3000 } = {}) {

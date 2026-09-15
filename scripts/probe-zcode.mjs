@@ -9,6 +9,9 @@ Default: --mock --scenario all; no ZCode, credentials or network required.
 --live --zcode /absolute/path/zcode.cjs --scenario session
 --live --zcode /absolute/path/zcode.cjs --allow-model --scenario smoke|cancel|resume
 --live --zcode /absolute/path/zcode.cjs --allow-model --allow-file-test --scenario deny
+--rebind-resume-model          Live resume + --allow-model only: explicitly reselect
+                               the original native model once; no config/credential read.
+                               Experimental; not an automatic retry or a guaranteed repair.
 --local-error                  Live session only: save the FIRST remote error's text
                                to a private temporary file, not to stdout. May contain
                                secrets; inspect locally, never upload or paste the file.
