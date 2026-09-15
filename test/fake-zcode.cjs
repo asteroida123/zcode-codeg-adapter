@@ -139,6 +139,7 @@ async function handle(frame) {
     return
   }
   reply(id, { accepted: true })
+  if (fault === 'exit-mid-turn') { setTimeout(() => process.exit(9), 5); return }
   if (params.content.includes('deny-sentinel.txt')) {
     if (fault === 'no-permission') { finish(sid, 'success', 'no action'); return }
     const permission = await reverse('interaction/requestPermission', { sessionId: sid, requestId: 'test', toolCallId: 'write' })

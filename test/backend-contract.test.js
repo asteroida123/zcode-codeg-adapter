@@ -194,6 +194,49 @@ test('Backend: cancel is sent once and waits for terminal observation', async t 
   assert.equal(result.cancelled, true)
   assert.equal(client.cancel(id), false)
 })
+test('Backend: the turn after a cancelled turn is fresh and strictly correlated', async t => {
+  const { client, cwd } = await fixture(t, '', true)
+  const id = await client.open(cwd)
+  const cancelled = await client.prompt(id, 'long response', { cancelOnStream: true })
+  assert.equal(cancelled.cancelled, true)
+  const next = await client.prompt(id, 'ZCODE_PROBE_abcdef')
+  assert.equal(next.cancelled, false)
+  assert.equal(next.terminalIdMatched, true)
+  assert.equal(next.turnCorrelation, 'matched-envelope-turn-id')
+  assert.equal((await client.inspect(id, 'ZCODE_PROBE_abcdef')).lastAssistantHasMarker, true)
+})
+test('Backend: cancellation settles a turn with a permission decision held open', async t => {
+  const { client, cwd } = await fixture(t, '', true, { permissionMode: 'hold' })
+  const id = await client.open(cwd, { mode: 'build' })
+  const pending = client.prompt(id, 'Write deny-sentinel.txt once')
+  const deadline = Date.now() + 5000
+  while (!(client.heldPermissions.get(id)?.length > 0)) {
+    if (Date.now() > deadline) throw new Error('permission was never held open')
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  assert.equal(client.cancel(id), true)
+  const result = await pending
+  assert.equal(result.cancelled, true)
+  assert.equal(result.terminalIdMatched, true)
+  await assert.rejects(access(join(cwd, 'deny-sentinel.txt')), { code: 'ENOENT' })
+  assert.equal(client.metrics.permissionsDenied, 1, 'held decisions settle as explicit denies')
+})
+test('Backend: backend death mid-turn rejects instead of faking a quiet end', async t => {
+  const { client, cwd } = await fixture(t, 'exit-mid-turn', true)
+  const id = await client.open(cwd)
+  await assert.rejects(client.prompt(id, 'hi'), error => code('E_EXIT')(error) || code('E_FRAME')(error) || code('E_PIPE')(error))
+  assert.equal((await client.close()).closed, true)
+})
+test('Backend: closing while a turn is active settles it as closed, not cancelled', async t => {
+  const { client, cwd } = await fixture(t, '', true)
+  const id = await client.open(cwd)
+  // Attach before close(): the turn settles during close's own shutdown.
+  const settled = client.prompt(id, 'long response').then(() => null, error => error)
+  const cleanup = await client.close()
+  const error = await settled
+  assert.equal(error?.code, 'E_CLOSED')
+  assert.equal(cleanup.closed, true)
+})
 test('Backend: ignored stop fails, poisons process, does not fake cancelled', async t => {
   const { client, cwd } = await fixture(t, 'ignore-stop', true)
   const id = await client.open(cwd)

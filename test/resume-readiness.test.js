@@ -88,7 +88,8 @@ test('Resume: continued send relays only an explicit published runtime descripto
   const build = () => {
     const subject = Object.create(AppServerBackend.prototype)
     subject.sessions = new Map([['s', { ready: true, active: null, finished: new Set() }]])
-    subject.metrics = { staleEvents: 0 }
+    subject.metrics = { staleEvents: 0, permissionsDenied: 0 }
+    subject.heldPermissions = new Map()
     subject.rpc = { failure: null, closing: false,
       request: (method, params) => { subject.captured = { method, params }; return Promise.reject(new ProbeError('E_REMOTE', -32031)) },
       close: async () => ({ closed: true, escalated: false }) }

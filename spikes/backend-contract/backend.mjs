@@ -9,6 +9,19 @@ export const PROFILE = 'app-server-cli-0.16.5-candidate'
 export const EXPECTED_CLI = '0.16.5'
 const idValue = value => typeof value === 'string' && value.length > 0 && value.length <= 512
 
+/** Settle held permission decisions with an explicit deny. Cancellation and
+ * shutdown must never leave a reverse request dangling; bounds stay tiny.
+ * A module function, so prototype-only test doubles remain valid receivers.
+ */
+function flushPermissions(heldPermissions, metrics, sessionId = null) {
+  for (const [key, responders] of [...heldPermissions]) {
+    if (sessionId !== null && key !== sessionId) continue
+    heldPermissions.delete(key)
+    for (const respond of responders) respond({ decision: 'deny', reason: 'Probe deny: turn cancelled or backend closing' })
+    metrics.permissionsDenied += responders.length
+  }
+}
+
 /** Candidate backend seam. Owns semantic operations; callers do not send RPC.
  * This spike intentionally does not advertise any ACP capabilities.
  * Wire facts and the still-unverified assumptions are in docs/BACKEND-PROBE.md.
@@ -16,6 +29,8 @@ const idValue = value => typeof value === 'string' && value.length > 0 && value.
 export class AppServerBackend {
   constructor(options) {
     this.sessions = new Map()
+    this.permissionMode = options.permissionMode === 'hold' ? 'hold' : 'deny'
+    this.heldPermissions = new Map()
     this.metrics = { preferences: 0, permissionsDenied: 0, unsupportedInteractions: 0,
       unknownNotifications: 0, staleEvents: 0, unknownEvents: 0 }
     this.rpc = new PrivateRpc({ ...options,
@@ -166,6 +181,10 @@ export class AppServerBackend {
     if (!turn || turn.settled || turn.cancelSent) return false
     turn.cancelSent = true
     this.rpc.notify('session/stop', { sessionId: id })
+    // Stop is fire-and-forget: the proof of cancellation stays the terminal
+    // event. Held permissions are settled so a pending approval cannot block
+    // the backend from observing or emitting that terminal.
+    flushPermissions(this.heldPermissions, this.metrics, id)
     turn.cancelTimer = setTimeout(() => {
       turn.finish(new ProbeError('E_CANCEL_UNCONFIRMED'))
       void this.close()
@@ -217,8 +236,16 @@ export class AppServerBackend {
       return { nativeSearchEnhancementsEnabled: false, memoryEnabled: false, askUserQuestionAutoResolutionEnabled: false }
     }
     if (method === 'interaction/requestPermission') {
-      this.metrics.permissionsDenied++
       const turn = this.sessions.get(params.sessionId)?.active
+      if (this.permissionMode === 'hold' && turn) {
+        // Hold the decision open: cancellation must settle the turn while the
+        // approval is still pending, never by silently approving it.
+        const held = this.heldPermissions.get(params.sessionId) ?? []
+        if (held.length >= 8) { this.metrics.permissionsDenied++; return { decision: 'deny', reason: 'Probe deny: held-permission bound exceeded' } }
+        this.heldPermissions.set(params.sessionId, held)
+        return new Promise(resolve => held.push(resolve))
+      }
+      this.metrics.permissionsDenied++
       if (turn) turn.denied++
       return { decision: 'deny', reason: 'Backend contract probe denies every permission request' }
     }
@@ -233,6 +260,7 @@ export class AppServerBackend {
   }
   close() {
     this.abortTurns(new ProbeError('E_CLOSED'))
+    flushPermissions(this.heldPermissions, this.metrics)
     return this.rpc.close()
   }
 }

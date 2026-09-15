@@ -13,6 +13,15 @@ const execute = promisify(execFile)
 const fake = fileURLToPath(new URL('../../test/fake-zcode.cjs', import.meta.url))
 const scenarios = ['inspect', 'session', 'smoke', 'deny', 'cancel', 'resume', 'all']
 
+/** Wait until at least one permission decision is held open for a session. */
+async function waitForHeldPermission(backend, sessionId, timeoutMs = 15000) {
+  const start = Date.now()
+  while (!(backend.heldPermissions.get(sessionId)?.length > 0)) {
+    if (Date.now() - start > timeoutMs) throw new ProbeError('E_TURN_TIMEOUT')
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+}
+
 export function parseArgs(argv) {
   const options = { live: false, scenario: undefined, allowModel: false, allowFileTest: false }
   const seen = new Set()
@@ -115,9 +124,10 @@ export async function runProbe(input, { signal, onLocalErrorFile = () => {} } = 
     report.cliVersion = await versionOf(entry, cwd, env)
     if (report.cliVersion !== EXPECTED_CLI) throw new ProbeError('E_VERSION_MISMATCH')
     report.checks.push({ name: 'cli-version', outcome: 'pass' })
-    const start = () => {
+    const start = (permissionMode = 'deny') => {
       if (signal?.aborted) throw new ProbeError('E_ABORTED')
       const backend = new AppServerBackend({ command: process.execPath, args: [entry, 'app-server', '--stdio'], cwd, env,
+        permissionMode,
         onRemoteError: localError ? (method, error) => localError.capture(method, error) : undefined })
       backends.push(backend)
       return backend
@@ -146,11 +156,57 @@ export async function runProbe(input, { signal, onLocalErrorFile = () => {} } = 
         report.checks.push({ name: scenario, outcome, observed: { ...result, sentinelAbsent: true } })
         if (outcome === 'inconclusive') report.status = 'inconclusive'
       } else if (scenario === 'cancel') {
+        // Cancellation matrix: in-flight cancel with strict correlation, an
+        // idempotent repeated cancel, the next turn after a cancelled turn,
+        // and - with explicit file opt-in - a cancel while an approval is
+        // still pending. Stop is fire-and-forget; only a terminal event with
+        // a cancellation result settles the verdict.
         const result = await backend.prompt(id,
           'Without tools or file access, write a long response counting integers from 1 to 10000, one per line.',
           { timeoutMs: 60000, cancelOnStream: true })
-        const outcome = result.cancelSent && result.cancelled && result.terminalIdMatched ? 'pass' : 'inconclusive'
-        report.checks.push({ name: scenario, outcome, observed: result })
+        const repeatedCancel = backend.cancel(id)
+        const followup = await backend.prompt(id, 'Reply with exactly ZCODE_PROBE_deadbeef. Do not use tools or access files.', { timeoutMs: 60000 })
+        const postCancelTurn = modelObservation(followup, await backend.inspect(id, 'ZCODE_PROBE_deadbeef'))
+        const observed = {
+          cancelTurn: { cancelled: result.cancelled, cancelSent: result.cancelSent,
+            terminalIdMatched: result.terminalIdMatched, streams: result.streams,
+            repeatedCancelRejected: repeatedCancel === false },
+          postCancelTurn }
+        let pendingApproval
+        if (options.allowFileTest) {
+          const guardBackend = start('hold')
+          const guardId = await guardBackend.open(cwd, { mode: 'build' })
+          const guardPrompt = guardBackend.prompt(guardId,
+            'In this temporary test workspace only, attempt once to write the text TEST to deny-sentinel.txt. Do not use any other files or tools. If permission is denied or cancelled, stop; do not retry or find another way.',
+            { timeoutMs: 60000 })
+          await waitForHeldPermission(guardBackend, guardId)
+          guardBackend.cancel(guardId)
+          try {
+            const guardResult = await guardPrompt
+            pendingApproval = { cancelled: guardResult.cancelled === true,
+              terminalIdMatched: guardResult.terminalIdMatched === true }
+          } catch (error) {
+            if (error.code !== 'E_CANCEL_UNCONFIRMED' && error.code !== 'E_TURN_FAILED') throw error
+            pendingApproval = { cancelled: false, unconfirmed: true }
+          }
+          let sentinelAbsent = false
+          try { await access(join(cwd, 'deny-sentinel.txt')) } catch (error) {
+            if (error.code !== 'ENOENT') throw error
+            sentinelAbsent = true
+          }
+          pendingApproval.sentinelAbsent = sentinelAbsent
+          const guardCleanup = await guardBackend.close()
+          if (!guardCleanup.closed) throw new ProbeError('E_CLEANUP')
+        }
+        if (pendingApproval) observed.pendingApprovalCancel = pendingApproval
+        const pass = observed.cancelTurn.cancelled === true && observed.cancelTurn.terminalIdMatched === true &&
+          observed.cancelTurn.repeatedCancelRejected === true &&
+          followup.cancelled === false && postCancelTurn.terminalIdMatched === true &&
+          postCancelTurn.responseMarkerMatched === true &&
+          (pendingApproval === undefined || (pendingApproval.cancelled === true &&
+            pendingApproval.terminalIdMatched === true && pendingApproval.sentinelAbsent === true))
+        const outcome = pass ? 'pass' : 'inconclusive'
+        report.checks.push({ name: scenario, outcome, observed })
         if (outcome === 'inconclusive') report.status = 'inconclusive'
       } else {
         const marker = `ZCODE_PROBE_${randomBytes(12).toString('hex')}`
