@@ -82,6 +82,28 @@ for (const [state, errorCode] of [
   })
 }
 
+test('Resume: continued send passes only an explicit well-formed runtimeModel reference', async () => {
+  const build = () => {
+    const subject = Object.create(AppServerBackend.prototype)
+    subject.sessions = new Map([['s', { ready: true, active: null, finished: new Set() }]])
+    subject.metrics = { staleEvents: 0 }
+    subject.rpc = { failure: null, closing: false,
+      request: (method, params) => { subject.captured = { method, params }; return Promise.reject(new ProbeError('E_REMOTE', -32031)) },
+      close: async () => ({ closed: true, escalated: false }) }
+    return subject
+  }
+  const subject = build()
+  await assert.rejects(subject.prompt('s', 'hello', { runtimeModel: original }), hasCode('E_REMOTE'))
+  assert.equal(subject.captured.method, 'session/send')
+  assert.deepEqual(subject.captured.params, { sessionId: 's', content: 'hello', runtimeModel: original })
+  const invalid = build()
+  await assert.rejects(invalid.prompt('s', 'hello', { runtimeModel: { providerId: '', modelId: 'm' } }), hasCode('E_SEND_RUNTIME_MODEL'))
+  assert.equal(invalid.captured, undefined)
+  const bare = build()
+  await assert.rejects(bare.prompt('s', 'hello'), hasCode('E_REMOTE'))
+  assert.deepEqual(bare.captured.params, { sessionId: 's', content: 'hello' })
+})
+
 test('Resume: baseline failure preserves first answer and restored history, without automatic rebind', async t => {
   const report = await probe(t)
   assert.equal(report.status, 'fail')
@@ -92,6 +114,7 @@ test('Resume: baseline failure preserves first answer and restored history, with
   assert.equal(report.resumeProgress.nativeResumeAccepted, true)
   assert.equal(report.resumeProgress.stage, 'continued-send')
   assert.equal(report.resumeProgress.rebindRequested, false)
+  assert.equal(report.resumeProgress.runtimeModelOnSend, false)
   assert.equal(report.resumeProgress.modelRebind, undefined)
   assert.equal(report.resumeProgress.secondTurnRetainedContext, undefined)
   assert.ok(!report.failureContext.completedRpcMethods.includes('session/setModel'))
@@ -116,6 +139,7 @@ test('Resume: opt-in reselection permits continued response in the synthetic gua
   assert.equal(report.resumeProgress.modelRebind.planModeRetained, true)
   assert.equal(report.resumeProgress.historyRetainedAfterRebind, true)
   assert.equal(report.resumeProgress.restoreWarningBeforeSend, null)
+  assert.equal(report.resumeProgress.runtimeModelOnSend, true)
   assert.equal(report.resumeProgress.secondTurnRetainedContext, true)
   assert.equal(report.resumeProgress.stage, 'complete')
   for (const privateText of ['private-provider', 'private-model', 'sess-private', 'ZCODE_PROBE_', 'SYNTHETIC-SECRET',

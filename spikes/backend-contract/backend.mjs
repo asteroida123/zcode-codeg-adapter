@@ -68,10 +68,11 @@ export class AppServerBackend {
     const assistant = history.messages.filter(message => message?.info?.role === 'assistant')
     const text = assistant.at(-1)?.parts?.filter(part => part.type === 'text').map(part => part.text ?? '').join('') ?? ''
     // Only return measurements. Never return model text or native IDs in reports.
+    // The native snapshot carries the restore warning inside the projection.
     return { messageCount: history.messages.length, assistantMessages: assistant.length,
       lastAssistantHasMarker: marker.length > 0 && text.includes(marker),
       idle: state.projection.status === 'idle',
-      restoreWarning: restoreWarningIndicator(state.lastError) }
+      restoreWarning: restoreWarningIndicator(state.projection.lastError) }
   }
 
   originalModelReference(id) {
@@ -89,10 +90,19 @@ export class AppServerBackend {
     return rebindOriginalModel(this.rpc, id, original)
   }
 
-  prompt(id, content, { timeoutMs = 30000, cancelOnStream = false, cancelTimeoutMs = 3000 } = {}) {
+  prompt(id, content, { timeoutMs = 30000, cancelOnStream = false, cancelTimeoutMs = 3000, runtimeModel = null } = {}) {
     const state = this.state(id)
     if (state.active) return Promise.reject(new ProbeError('E_BUSY'))
     if (this.rpc.failure || this.rpc.closing) return Promise.reject(new ProbeError('E_CLOSED'))
+    const params = { sessionId: id, content }
+    // Native send schema accepts an explicit runtimeModel; the backend applies
+    // it before guarding. Only a caller-supplied reference passes through.
+    if (runtimeModel !== null) {
+      if (!object(runtimeModel) || !idValue(runtimeModel.providerId) || !idValue(runtimeModel.modelId)) {
+        return Promise.reject(new ProbeError('E_SEND_RUNTIME_MODEL'))
+      }
+      params.runtimeModel = { providerId: runtimeModel.providerId, modelId: runtimeModel.modelId }
+    }
     return new Promise((resolve, reject) => {
       const turn = { accepted: false, started: false, turnId: null, terminal: null, cancelSent: false,
         streams: 0, tools: 0, denied: 0, cancelOnStream, cancelTimeoutMs,
@@ -117,7 +127,7 @@ export class AppServerBackend {
         // Outcome is unknown; poison the transport instead of replaying a prompt.
         void this.close()
       }, timeoutMs)
-      this.rpc.request('session/send', { sessionId: id, content }).then(result => {
+      this.rpc.request('session/send', params).then(result => {
         if (turn.settled) return
         if (result?.accepted !== true) { turn.finish(new ProbeError('E_SEND_REJECTED')); void this.close(); return }
         turn.accepted = true

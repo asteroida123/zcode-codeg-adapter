@@ -29,12 +29,12 @@ function snapshot() {
   let model = { providerId: 'private-provider', modelId: 'private-model' }
   if (fault === 'missing-reference' || (restored && fault === 'missing-restored-reference')) model = { modelId: 'private-model' }
   if ((restored && fault === 'pre-rebind-drift') || (rebound && fault === 'post-rebind-drift')) model.modelId = 'other-model'
-  // Mirrors the observed native layout: a blocked restore exposes a lastError
-  // object until a model runtime is applied again (still-guarded keeps it).
+  // Mirrors the observed native layout: the restore warning lives INSIDE the
+  // projection (session/read), until a model runtime is applied again.
   const guarded = restored && (!rebound || fault === 'still-guarded')
-  return { projection: { status: fault === 'busy' && restored ? 'running' : 'idle' },
-    settings: { model: { current: model }, mode: { current: rebound && fault === 'mode-drift' ? 'build' : 'plan' } },
-    ...(guarded ? { lastError: { message: '历史任务使用的模型已不可用', type: 'ZCODE_RUNTIME_MODEL_UNAVAILABLE' } } : {}) }
+  return { projection: { status: fault === 'busy' && restored ? 'running' : 'idle',
+      ...(guarded ? { lastError: { message: '历史任务使用的模型已不可用', type: 'ZCODE_RUNTIME_MODEL_UNAVAILABLE' } } : {}) },
+    settings: { model: { current: model }, mode: { current: rebound && fault === 'mode-drift' ? 'build' : 'plan' } } }
 }
 function event(type, payload = {}) {
   out({ method: 'session/event', params: { sessionId: saved.id, seq: ++seq, type, payload } })
@@ -72,7 +72,12 @@ async function handle(frame) {
   }
   if (method === 'session/send') {
     await preferences()
-    if (restored && (!rebound || fault === 'still-guarded')) { error(id); return }
+    // Mirrors the hypothesized native contract under test: a restored session
+    // refuses the continued send unless it carries the same runtimeModel, and
+    // still-guarded refuses even then. Verified against real ZCode separately.
+    const expectedRuntime = { providerId: 'private-provider', modelId: 'private-model' }
+    if (restored && (!rebound || fault === 'still-guarded' ||
+        JSON.stringify(params.runtimeModel) !== JSON.stringify(expectedRuntime))) { error(id); return }
     const marker = params.content.match(/ZCODE_PROBE_[a-f0-9]+/)?.[0] || saved.messages.at(-1)?.parts[0].text
     if (!marker) { error(id, -32602); return }
     const turnId = `private-turn-${++saved.sends}`
