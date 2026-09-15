@@ -6,10 +6,10 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { localErrorTexts, LocalErrorCapture } from '../spikes/backend-contract/local-error.mjs'
-import { remoteIndicators } from '../spikes/backend-contract/diagnostics.mjs'
+import { localErrorTexts, LocalErrorCapture } from '../src/backend/local-error.mjs'
+import { remoteIndicators } from '../src/backend/diagnostics.mjs'
 import { parseArgs, runProbe } from '../spikes/backend-contract/probe.mjs'
-import { PrivateRpc } from '../spikes/backend-contract/rpc.mjs'
+import { PrivateRpc } from '../src/backend/rpc.mjs'
 const execute = promisify(execFile)
 const fake = fileURLToPath(new URL('./fake-zcode.cjs', import.meta.url))
 const cli = fileURLToPath(new URL('../scripts/probe-zcode.mjs', import.meta.url))

@@ -3,9 +3,9 @@ import test from 'node:test'
 import { mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { AppServerBackend } from '../spikes/backend-contract/backend.mjs'
+import { AppServerBackend } from '../src/backend/backend.mjs'
 import { parseArgs, runProbe } from '../spikes/backend-contract/probe.mjs'
-import { identityShape, modelObservation, turnIdentity } from '../spikes/backend-contract/turn-evidence.mjs'
+import { identityShape, modelObservation, turnIdentity } from '../src/backend/turn-evidence.mjs'
 
 // Independent SYNTHETIC wire fixture. No real ZCode, inherited HOME, credentials,
 // native transcripts or network. The fake IDs deliberately look like secrets.

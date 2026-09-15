@@ -89,7 +89,9 @@ test('mixed-case Windows environment keys cannot reactivate remote routing', () 
 
 test('dependency is exactly pinned and publishing has no build/install hooks', () => {
   assert.match(upstreamVersion, /^\d+\.\d+\.\d+$/)
-  assert.deepEqual(Object.keys(manifest.dependencies), ['zcode-acp-server'])
+  assert.deepEqual(Object.keys(manifest.dependencies).sort(),
+    ['@agentclientprotocol/sdk', 'zcode-acp-server'])
+  assert.equal(manifest.dependencies['@agentclientprotocol/sdk'], '1.4.0')
   for (const name of ['install', 'postinstall', 'prepare', 'prepublishOnly']) assert.equal(manifest.scripts[name], undefined)
   assert.equal(manifest.bin['zcode-codeg'], 'bin/zcode-codeg.js')
 })

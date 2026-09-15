@@ -7,7 +7,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { inspectSetup, choicesFrom, buildConfig, applySetup, SetupError } from '../scripts/setup-zcode-cli.mjs'
-import { remoteIndicators } from '../spikes/backend-contract/diagnostics.mjs'
+import { remoteIndicators } from '../src/backend/diagnostics.mjs'
 const execute = promisify(execFile)
 const entry = fileURLToPath(new URL('../scripts/setup-zcode-cli.mjs', import.meta.url))
 const secret = 'sk-SYNTHETIC-SETUP-SECRET'

@@ -9,6 +9,7 @@
       "version": "0.1.0",
       "license": "MIT",
       "dependencies": {
+        "@agentclientprotocol/sdk": "1.4.0",
         "zcode-acp-server": "0.32.0"
       },
       "bin": {

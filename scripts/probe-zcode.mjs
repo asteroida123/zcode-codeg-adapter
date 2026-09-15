@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs, runProbe, saveReport } from '../spikes/backend-contract/probe.mjs'
-import { diagnostic } from '../spikes/backend-contract/errors.mjs'
+import { diagnostic } from '../src/backend/errors.mjs'
 const shellQuote = value => "'" + value.replaceAll("'", "'\\''") + "'"
 const HELP = `ZCode backend contract probe (not the ACP agent)
 Default: --mock --scenario all; no ZCode, credentials or network required.

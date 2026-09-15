@@ -4,9 +4,9 @@ import { mkdtemp, rm, readFile, access } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { PrivateRpc } from '../spikes/backend-contract/rpc.mjs'
-import { AppServerBackend } from '../spikes/backend-contract/backend.mjs'
-import { diagnostic, ProbeError } from '../spikes/backend-contract/errors.mjs'
+import { PrivateRpc } from '../src/backend/rpc.mjs'
+import { AppServerBackend } from '../src/backend/backend.mjs'
+import { diagnostic, ProbeError } from '../src/backend/errors.mjs'
 const fake = fileURLToPath(new URL('./fake-zcode.cjs', import.meta.url))
 async function fixture(t, fault = '', backend = false, extra = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'zcode backend test '))

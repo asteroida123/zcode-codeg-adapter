@@ -5,10 +5,10 @@ import { mkdtemp, mkdir, realpath, stat, rm, access, writeFile } from 'node:fs/p
 import { tmpdir } from 'node:os'
 import { join, isAbsolute, extname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { AppServerBackend, PROFILE, EXPECTED_CLI } from './backend.mjs'
-import { ProbeError, diagnostic } from './errors.mjs'
-import { LocalErrorCapture } from './local-error.mjs'
-import { modelObservation } from './turn-evidence.mjs'
+import { AppServerBackend, PROFILE, EXPECTED_CLI } from '../../src/backend/backend.mjs'
+import { ProbeError, diagnostic } from '../../src/backend/errors.mjs'
+import { LocalErrorCapture } from '../../src/backend/local-error.mjs'
+import { modelObservation } from '../../src/backend/turn-evidence.mjs'
 const execute = promisify(execFile)
 const fake = fileURLToPath(new URL('../../test/fake-zcode.cjs', import.meta.url))
 const scenarios = ['inspect', 'session', 'smoke', 'deny', 'cancel', 'resume', 'all']

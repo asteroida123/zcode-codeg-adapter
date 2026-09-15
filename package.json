@@ -35,6 +35,7 @@
     "test:resume": "node --test test/resume-readiness.test.js"
   },
   "dependencies": {
+    "@agentclientprotocol/sdk": "1.4.0",
     "zcode-acp-server": "0.32.0"
   }
 }

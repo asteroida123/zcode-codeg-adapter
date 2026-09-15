@@ -8,26 +8,26 @@ import { spawnSync } from 'node:child_process'
 import assert from 'node:assert/strict'
 const root = fileURLToPath(new URL('../', import.meta.url))
 const cases = [
-  { name: 'private error opt-in', file: 'probe.mjs', testFile: 'test/local-error.test.js',
+  { name: 'private error opt-in', file: 'spikes/backend-contract/probe.mjs', testFile: 'test/local-error.test.js',
     pattern: 'Local diagnostics: default failure',
     before: 'const localError = options.localError ? new LocalErrorCapture() : null',
     after: 'const localError = new LocalErrorCapture()' },
-  { name: 'nested details classification', file: 'diagnostics.mjs', testFile: 'test/local-error.test.js',
+  { name: 'nested details classification', file: 'src/backend/diagnostics.mjs', testFile: 'test/local-error.test.js',
     pattern: 'Local diagnostics: string data.details',
     before: "'detail', 'details', 'issues'", after: "'detail', 'issues'" },
-  { name: 'permission deny', file: 'backend.mjs', pattern: 'Backend: permission denial',
+  { name: 'permission deny', file: 'src/backend/backend.mjs', pattern: 'Backend: permission denial',
     before: "return { decision: 'deny', reason: 'Backend contract probe denies every permission request' }",
     after: "return { decision: 'allow', reason: 'Backend contract probe denies every permission request' }" },
-  { name: 'send acceptance barrier', file: 'backend.mjs', pattern: 'Backend: terminal before send acknowledgement',
+  { name: 'send acceptance barrier', file: 'src/backend/backend.mjs', pattern: 'Backend: terminal before send acknowledgement',
     before: 'if (!turn.accepted || !turn.terminal || turn.settled) return', after: 'if (!turn.terminal || turn.settled) return' },
-  { name: 'restore warning classification', file: 'backend.mjs', testFile: 'test/resume-readiness.test.js',
+  { name: 'restore warning classification', file: 'src/backend/backend.mjs', testFile: 'test/resume-readiness.test.js',
     pattern: 'Resume: guarded restore surfaces the native warning before the paid send',
     before: 'restoreWarning: restoreWarningIndicator(state.projection.lastError)', after: 'restoreWarning: null' },
-  { name: 'runtime model pass-through', file: 'backend.mjs', testFile: 'test/resume-readiness.test.js',
+  { name: 'runtime model pass-through', file: 'src/backend/backend.mjs', testFile: 'test/resume-readiness.test.js',
     pattern: 'Resume: continued send relays only an explicit published runtime descriptor',
     before: 'params.runtimeModel = runtimeModel',
     after: 'void runtimeModel' },
-  { name: 'reverse-request namespace', file: 'rpc.mjs', pattern: 'RPC: reverse request ID',
+  { name: 'reverse-request namespace', file: 'src/backend/rpc.mjs', pattern: 'RPC: reverse request ID',
     before: '    if (hasMethod) {',
     after: '    if (hasMethod && hasId && this.pending.has(frame.id)) { this.pending.get(frame.id)(null, frame.params); return }\n    if (hasMethod) {' },
 ]
@@ -35,6 +35,7 @@ for (const mutation of cases) {
   const dir = await mkdtemp(join(tmpdir(), 'zcode-mutation-'))
   try {
     await cp(join(root, 'spikes'), join(dir, 'spikes'), { recursive: true })
+    await cp(join(root, 'src'), join(dir, 'src'), { recursive: true })
     await cp(join(root, 'test'), join(dir, 'test'), { recursive: true })
     await writeFile(join(dir, 'package.json'), '{"type":"module"}')
     // Reporter defaults vary across Node versions; assertions below parse TAP.
@@ -42,7 +43,7 @@ for (const mutation of cases) {
       ['--test', '--test-reporter=tap', '--test-name-pattern', mutation.pattern, mutation.testFile ?? 'test/backend-contract.test.js'],
       { cwd: dir, encoding: 'utf8', timeout: 15000, maxBuffer: 1024 * 1024 })
     assert.equal(run().status, 0, `${mutation.name}: baseline must pass`)
-    const path = join(dir, 'spikes/backend-contract', mutation.file)
+    const path = join(dir, mutation.file)
     const source = await readFile(path, 'utf8')
     assert.equal(source.split(mutation.before).length, 2, 'Mutation must match exactly once')
     await writeFile(path, source.replace(mutation.before, mutation.after))

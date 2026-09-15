@@ -2,10 +2,10 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
 import { runProbe, parseArgs, validateOptions } from '../spikes/backend-contract/probe.mjs'
-import { rebindOriginalModel, modelReferenceFromSnapshot } from '../spikes/backend-contract/resume-model.mjs'
-import { AppServerBackend } from '../spikes/backend-contract/backend.mjs'
-import { diagnostic, ProbeError } from '../spikes/backend-contract/errors.mjs'
-import { remoteIndicators } from '../spikes/backend-contract/diagnostics.mjs'
+import { rebindOriginalModel, modelReferenceFromSnapshot } from '../src/backend/resume-model.mjs'
+import { AppServerBackend } from '../src/backend/backend.mjs'
+import { diagnostic, ProbeError } from '../src/backend/errors.mjs'
+import { remoteIndicators } from '../src/backend/diagnostics.mjs'
 
 const fake = fileURLToPath(new URL('./fake-resume-model.cjs', import.meta.url))
 const original = { providerId: 'private-provider', modelId: 'private-model' }
