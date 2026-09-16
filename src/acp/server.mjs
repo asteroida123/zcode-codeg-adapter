@@ -123,16 +123,7 @@ export class ZcodeCodegAgent {
     const sessionId = await backend.open(params.cwd, { sessionId: params.sessionId, mcpServers: params.mcpServers ?? [] })
     const session = { backend, sessionId, cwd: params.cwd, seenToolCallIds: new Set() }
     this.#sessions.set(sessionId, session)
-    // With an adapter config, remember the descriptor supplier for the first
-    // resumed send; without one this stays null (relay-only mode).
-    let configDescriptor = null
-    try {
-      await backend.inspect(sessionId, '')
-      configDescriptor = buildRuntimeModel(this.#config, backend.originalModelReference(sessionId))
-    } catch {
-      configDescriptor = null
-    }
-    if (configDescriptor) session.configDescriptor = configDescriptor
+    await this.#captureConfigDescriptor(session)
     // ACP load replays history before the request returns. Only text parts
     // are replayed; counts stay bounded to protect the client connection.
     const history = await backend.messages(sessionId)
@@ -294,10 +285,27 @@ export class ZcodeCodegAgent {
     try {
       const backend = this.#backendFactory(session.cwd, this.#conn)
       await backend.open(session.cwd, { sessionId })
-      this.#sessions.set(sessionId, { backend, sessionId, cwd: session.cwd, seenToolCallIds: new Set() })
+      const fresh = { backend, sessionId, cwd: session.cwd, seenToolCallIds: new Set() }
+      this.#sessions.set(sessionId, fresh)
+      // A recycled backend resumed the native session, so the restore guard
+      // applies again: rebuild the descriptor supply for the next send.
+      await this.#captureConfigDescriptor(fresh)
       return true
     } catch {
       return false
+    }
+  }
+
+  /** With an adapter config, capture the descriptor supplier for resumed
+   * sends; without one this stays unset (relay-only mode).
+   */
+  async #captureConfigDescriptor(session) {
+    try {
+      await session.backend.inspect(session.sessionId, '')
+      const descriptor = buildRuntimeModel(this.#config, session.backend.originalModelReference(session.sessionId))
+      if (descriptor) session.configDescriptor = descriptor
+    } catch {
+      // No native reference or no config: relay-only.
     }
   }
 

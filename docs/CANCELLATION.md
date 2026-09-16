@@ -43,3 +43,15 @@ ACP 的 `session/cancel` → stop 请求（记录 ack）→ 有界等待关联�
 session/prompt 请求以 `E_CANCEL_RECYCLED` 错误收场——绝不伪造 `cancelled`。
 合成回归：test/acp-server.test.js「unconfirmed cancellation recycles the
 backend and the session survives」（ignore-stop 故障 + 400ms 确认窗）。
+
+## 2026-09-16 真实验收矩阵（ACP 生产路径，ALL-PASS）
+
+`scripts/acp-live-acceptance.mjs` 六场景全部通过（真实 CLI 0.16.5 + glm-5.3-flash）：
+初始化、读文件（工具生命周期 pending→in_progress→completed 可见）、批准写入
+（权限委托→客户端 allow→磁盘落盘）、拒绝写入（deny 生效、磁盘无文件）、长工具
+（in_progress→completed）、**待审批取消**（权限挂起时取消→deny 结算→文件未写→
+进程回收→带描述符 resume→续聊成功）。
+
+注意：待审批取消在真实 CLI 上仍以回收收场（stop 缺陷使 15 秒内无终止事件），
+会话经 resume+配置供给保持可用——`E_CANCEL_RECYCLED` 上报符合契约，不伪造
+cancelled。
