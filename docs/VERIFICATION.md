@@ -22,3 +22,16 @@ CI 没有安装或登录真实 ZCode；没有发起模型请求，没有验证 C
 此项目没有修改 `xintaofei/codeg` 或用户的 Codeg fork，没有创建正式内置 ZCode 的 Codeg PR，也未发布到 npm。
 
 手工端到端验收清单：[ACCEPTANCE.md](ACCEPTANCE.md)。
+
+## 2026-09-16 Node 25 兼容（T0）
+
+- 本机全量离线回归在 **Node 25.6.1 / macOS arm64** 上 **206/206 通过**（含此前被
+  版本门拒绝的 10 项 legacy launcher 测试），锁定上游包握手
+  `zcode-acp-server@0.32.0` 2/2 通过；mutation 负控 7/7、synthetic probe 全场景
+  通过（probe 报告 runtime.node=25.6.1）。
+- 真实 ZCode 证据同样记录于 Node 25：T1 恢复续聊 PASS 与六场景验收矩阵
+  ALL-PASS 均在 Node 25.6.1 宿主下执行，且探测经 `process.execPath` 启动原生
+  `zcode.cjs`——宿主与原生子进程**同为 Node 25.6.1**，不存在旧运行时残余。
+- CI 矩阵新增 Ubuntu 25.0.0 / 25.9.0 与 macOS、Windows 的 25.9.0（Node 25 为
+  非 LTS 线，官方维护已于 2026-06 结束；项目保证可运行，不承担 EOL 安全补丁，
+  长期部署推荐 Node 24/22 LTS）。

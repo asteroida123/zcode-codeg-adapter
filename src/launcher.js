@@ -35,9 +35,9 @@ export function parseArgs(args) {
 
 export function assertNode(versions = process.versions) {
   const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(versions.node ?? '')
-  if (versions.bun || !match || ![22, 24].includes(Number(match[1])) ||
+  if (versions.bun || !match || ![22, 24, 25].includes(Number(match[1])) ||
       (Number(match[1]) === 22 && Number(match[2]) < 16)) {
-    throw new LauncherError('E_NODE', 'Use real Node.js 22 (>=22.16.0) or 24 with node:sqlite; Bun is not supported by this launch profile.')
+    throw new LauncherError('E_NODE', 'Use real Node.js 22 (>=22.16.0), 24 or 25 with node:sqlite; Bun is not supported by this launch profile.')
   }
 }
 

@@ -57,7 +57,7 @@ test('Node floor and real Node runtime are enforced', () => {
   for (const node of ['20.19.0', '22.15.0', '23.5.0', '26.0.0', 'bad', '22.16.0-pre']) {
     assert.throws(() => assertNode({ node }), { code: 'E_NODE' })
   }
-  for (const node of ['22.16.0', '22.23.0', '24.0.0']) assert.doesNotThrow(() => assertNode({ node }))
+  for (const node of ['22.16.0', '22.23.0', '24.0.0', '25.0.0', process.versions.node]) assert.doesNotThrow(() => assertNode({ node }))
   assert.throws(() => assertNode({ node: '24.0.0', bun: '1.4.0' }), { code: 'E_NODE' })
 })
 

@@ -23,7 +23,7 @@ Codeg ── ACP / stdio ── zcode-codeg
 
 ## 安装与检查
 
-需要真实 Node.js **22（>=22.16.0）或 24**（含 `node:sqlite`）、本机安装并已登录的 ZCode。优先使用更新到安全补丁版本的 Node 22/24；22.16.0 是兼容性下限，不是推荐固定的安全版本。ZCode CLI/桌面运行时与上游桥接的兼容性需在本机验收，不能把 `doctor` 成功当成登录或模型调用成功。
+需要真实 Node.js **22（>=22.16.0）、24 或 25**（含 `node:sqlite`）、本机安装并已登录的 ZCode。长期部署优先使用获官方支持的 Node 24/22 LTS 并更新到安全补丁版本；22.16.0 是兼容性下限，不是推荐固定的安全版本。Node 25 为非 LTS 线（官方维护已于 2026-06 结束），本项目保证在其上可运行，但不承担 EOL 运行时的安全补丁。ZCode CLI/桌面运行时与上游桥接的兼容性需在本机验收，不能把 `doctor` 成功当成登录或模型调用成功。
 
 ```bash
 git clone https://github.com/asteroida123/zcode-codeg-adapter.git

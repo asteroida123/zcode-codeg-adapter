@@ -16,10 +16,18 @@ jobs:
             node: '22.16.0'
           - os: ubuntu-latest
             node: '24'
+          - os: ubuntu-latest
+            node: '25.0.0'
+          - os: ubuntu-latest
+            node: '25.9.0'
           - os: macos-latest
             node: '22'
+          - os: macos-latest
+            node: '25.9.0'
           - os: windows-latest
             node: '22'
+          - os: windows-latest
+            node: '25.9.0'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
@@ -40,4 +48,4 @@ jobs:
         shell: bash
         run: |
           npm pack --dry-run --ignore-scripts --json > pack-manifest.json
-          node --input-type=module -e "import fs from 'node:fs'; import assert from 'node:assert/strict'; const files = JSON.parse(fs.readFileSync('pack-manifest.json'))[0].files.map(f => f.path); for (const p of ['bin/zcode-codeg.js', 'src/launcher.js', 'npm-shrinkwrap.json']) assert.ok(files.includes(p), p);"
+          node --input-type=module -e "import fs from 'node:fs'; import assert from 'node:assert/strict'; const files = JSON.parse(fs.readFileSync('pack-manifest.json'))[0].files.map(f => f.path); for (const p of ['bin/zcode-codeg.js', 'bin/zcode-codeg-acp.js', 'src/launcher.js', 'src/acp/server.mjs', 'src/backend/backend.mjs', 'npm-shrinkwrap.json']) assert.ok(files.includes(p), p);"
