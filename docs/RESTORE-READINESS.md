@@ -1,5 +1,38 @@
 # 恢复历史不等于恢复可推理状态
 
+## 2026-09-16 适配器配置供给实验（真实 CLI，生产路径）
+
+`scripts/acp-live-resume.mjs` 通过真实生产路径验证恢复续聊：
+进程 1（backend seam）建会话+首turn+捕获原生模型引用 → 写适配器配置 →
+**ACP 适配器二进程（bin + ZCODE_CODEG_CONFIG）session/load + 续聊** →
+第三进程读历史核对。
+
+结果：firstTurn ✓、nativeReference ✓、**acpLoad ✓（真实 CLI 接受恢复）**，
+续聊 send 携带配置构建的完整描述符通过了原生 zod（不再 -32602）并**进入
+runtime 应用路径**——错误从恢复守卫的 -32031 变为 -32603：以“仅标识符+kind”
+的 provider 定义构建真实 runtime 时语义字段不足（openai-compatible 需要
+baseURL 等，这些值只存在于用户私有配置中）。
+
+**结论**：供给机制成立，守卫已被绕过到 runtime 构建这一步；剩余缺口是用户
+一次性显式配置 provider 的语义字段（方案 a 的配置内容）。适配器配置
+（`ZCODE_CODEG_CONFIG`，绝对路径，JSON）：
+
+```json
+{
+  "providers": [{
+    "providerId": "<原生 settings.model.current 的 providerId>",
+    "kind": "openai-compatible",
+    "apiFormat": "openai-chat-completions",
+    "baseURL": "<你的 provider 端点>",
+    "apiKey": { "source": "env", "name": "<环境变量名>" },
+    "models": [{ "modelId": "<原生 modelId>" }]
+  }]
+}
+```
+
+apiKey 支持四种来源（credential/env/server-config/inline），引用式配置不含
+密钥本体。用户补全 baseURL 等字段后重跑同一实验即可判定真实续聊。
+
 ## 2026-09-15 两次授权真实实验的结论（本机直接执行，CLI 0.16.5）
 
 前置：实验前发现 `~/.zcode/cli/config.json` 丢失（setup 工具检查确认），由用户

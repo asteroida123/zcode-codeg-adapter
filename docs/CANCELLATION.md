@@ -35,3 +35,11 @@ stop 不起作用）在本机得到复现。
   悬挂反向请求，也绝不默认允许；合成回归覆盖（`permissionMode: 'hold'`）。
 - 取消后的下一回合、重复取消幂等、关闭期间结算、后端崩溃中拒绝：合成套件
   全覆盖（backend-contract.test.js）。
+
+## 2026-09-16 适配器回收回退（已实现，合成验证）
+
+ACP 的 `session/cancel` → stop 请求（记录 ack）→ 有界等待关联终止。超时未
+确认即回收后端进程并跨进程 resume 原生会话（会话保持可用），被打断的
+session/prompt 请求以 `E_CANCEL_RECYCLED` 错误收场——绝不伪造 `cancelled`。
+合成回归：test/acp-server.test.js「unconfirmed cancellation recycles the
+backend and the session survives」（ignore-stop 故障 + 400ms 确认窗）。

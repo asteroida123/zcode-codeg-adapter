@@ -7,6 +7,13 @@ const idValue = value => typeof value === 'string' && value.length > 0 && value.
 const DEFAULT_PROMPT_TIMEOUT_MS = 600000
 const STOP_CANCEL_TIMEOUT_MS = 15000
 
+/** Bounded wire diagnostic for a backend ProbeError. */
+function annotatedMessage(error) {
+  return `${error.code}${error.rpcCode !== undefined ? `/${error.rpcCode}` : ''}` +
+    (Array.isArray(error.details?.remoteHints) && error.details.remoteHints.length > 0
+      ? `/${error.details.remoteHints.join('+')}` : '')
+}
+
 /** Honest mapping from a backend prompt outcome to an ACP stop reason.
  * `cancelled` is only ever reported with a correlated terminal event; an
  * unconfirmed stop is surfaced as an error, never as a fake cancellation.
@@ -134,6 +141,11 @@ export class ZcodeCodegAgent {
           recycledError.code = 'E_CANCEL_RECYCLED'
           throw recycledError
         }
+      }
+      // Bounded diagnostics ride on the wire so clients can classify native
+      // failures without raw error text.
+      if (error?.code !== undefined && typeof error.code === 'string' && error.code.startsWith('E_')) {
+        error.message = annotatedMessage(error)
       }
       throw error
     }
