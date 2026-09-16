@@ -19,8 +19,10 @@ const flag = name => {
   return index >= 0 ? args[index + 1] : undefined
 }
 const entry = flag('--entry') ?? process.env.ZCODE_CODEG_ENTRY ?? ''
+const userConfig = flag('--config')
 const bin = fileURLToPath(new URL('../bin/zcode-codeg-acp.js', import.meta.url))
 if (!isAbsolute(entry)) { console.error('E_ENTRY: --entry must be absolute'); process.exit(1) }
+if (userConfig !== undefined && !isAbsolute(userConfig)) { console.error('E_CONFIG: --config must be absolute'); process.exit(1) }
 
 const liveEnv = (() => {
   const env = { ...process.env }
@@ -100,13 +102,19 @@ try {
   report.checks.firstTurn = first.terminalObserved === true && before.lastAssistantHasMarker === true
   const reference = backend.originalModelReference(sessionId)
   report.checks.nativeReference = reference.providerId.length > 0 && reference.modelId.length > 0
-  const configPath = join(workspace, 'adapter-config.json')
-  await writeFile(configPath, JSON.stringify({
-    providers: [{
-      providerId: reference.providerId, kind: 'openai-compatible',
-      models: [{ modelId: reference.modelId }],
-    }],
-  }))
+  report.providerId = reference.providerId
+  report.modelId = reference.modelId
+  // With --config the user's own adapter configuration is authoritative;
+  // otherwise a minimal descriptor is synthesized from the native reference.
+  const configPath = userConfig ?? join(workspace, 'adapter-config.json')
+  if (!userConfig) {
+    await writeFile(configPath, JSON.stringify({
+      providers: [{
+        providerId: reference.providerId, kind: 'openai-compatible',
+        models: [{ modelId: reference.modelId }],
+      }],
+    }))
+  }
   await backend.close()
   backend = null
   await acpLoadAndContinue(configPath)
@@ -114,7 +122,12 @@ try {
   try {
     await verifier.open(workspace, { sessionId })
     const after = await verifier.inspect(sessionId, marker)
-    report.checks.contextRetained = after.assistantMessages === before.assistantMessages + 1 &&
+    report.contextDetails = {
+      assistantBefore: before.assistantMessages,
+      assistantAfter: after.assistantMessages,
+      markerInLastAssistant: after.lastAssistantHasMarker === true,
+    }
+    report.checks.contextRetained = after.assistantMessages > before.assistantMessages &&
       after.lastAssistantHasMarker === true
   } finally {
     await verifier.close()

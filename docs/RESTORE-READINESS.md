@@ -1,5 +1,29 @@
 # 恢复历史不等于恢复可推理状态
 
+## 2026-09-16 恢复续聊已在真实环境修复并验证（PASS）
+
+用户授权读取其 provider 语义字段并代写适配器配置后，`scripts/acp-live-resume.mjs
+--config <配置>` 在真实生产路径上**完整通过**：进程 1 建会话+首turn（随机标记
+命中）→ 跨进程关闭 → **ACP 适配器二进程 session/load + 续聊 send（携带配置
+构建的完整 runtimeModel 描述符）** → 第三进程读历史：`assistantAfter` 增长且
+最后一条助手消息**准确回忆第一轮随机标记**（`contextRetained: true`）。
+
+生效的配置关键点（真实值已写入用户 `~/.config/zcode-codeg-adapter/config.json`，
+0600，不在仓库）：
+
+- `kind` 必须与真实 provider 一致——本机是 **`anthropic`**（此前实验猜
+  `openai-compatible` 正是 -32603 的根因：kind 决定 runtime 构建器）。
+- `apiFormat: "anthropic-messages"` + `baseURL` 为构建真实 runtime 所需。
+- `apiKey: {source:"inline"}` 在本机必要（无鉴权的 runtime 生成即
+  turn.failed）；也支持 `env`/`credential`/`server-config` 引用式来源。
+- `model` 与 `provider.models` 至少覆盖原生引用的 modelId。
+
+错误演进链（同一阻塞，四次实验）：-32031（守卫）→ -32602（描述符 schema）
+→ -32603（kind 错误致 runtime 构建失败）→ E_TURN_FAILED（无鉴权）→ **PASS**。
+
+保留边界：探测工具自身仍不读用户配置；本配置由用户显式授权后代写（方案 a），
+密钥只存在于用户目录的 0600 文件，从未进入仓库、报告或日志。
+
 ## 2026-09-16 适配器配置供给实验（真实 CLI，生产路径）
 
 `scripts/acp-live-resume.mjs` 通过真实生产路径验证恢复续聊：
