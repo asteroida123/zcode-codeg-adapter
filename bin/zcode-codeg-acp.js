@@ -6,6 +6,7 @@ import { isAbsolute } from 'node:path'
 import { stat, realpath } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { serveOverStdio } from '../src/acp/server.mjs'
+import { loadAdapterConfig } from '../src/config/adapter-config.mjs'
 
 const require = createRequire(import.meta.url)
 
@@ -34,6 +35,14 @@ function liveEnvironment() {
 
 const entry = process.env.ZCODE_CODEG_ENTRY ?? ''
 if (!isAbsolute(entry) || !entry.endsWith('.cjs')) fail('E_ENTRY', 'Set ZCODE_CODEG_ENTRY to the absolute path of the ZCode CLI .cjs entry.')
+
+// Explicit adapter configuration enables resumed-session continuation; an
+// invalid explicitly-set path fails startup instead of degrading silently.
+const configPath = process.env.ZCODE_CODEG_CONFIG ?? ''
+if (configPath !== '' && !isAbsolute(configPath)) {
+  fail('E_CONFIG', 'ZCODE_CODEG_CONFIG must be an absolute path when set.')
+}
+const config = await loadAdapterConfig(configPath === '' ? undefined : configPath)
 try {
   const resolved = await realpath(entry)
   if (!(await stat(resolved)).isFile()) throw new Error('not a file')
@@ -41,4 +50,4 @@ try {
   fail('E_ENTRY', 'ZCODE_CODEG_ENTRY does not resolve to a readable file.')
 }
 
-serveOverStdio({ command: process.execPath, entry, env: liveEnvironment() })
+serveOverStdio({ command: process.execPath, entry, env: liveEnvironment(), config })

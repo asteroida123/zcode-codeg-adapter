@@ -1,4 +1,5 @@
 import { AppServerBackend } from '../backend/backend.mjs'
+import { buildRuntimeModel } from '../config/adapter-config.mjs'
 import { AgentSideConnection, ndJsonStream, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { Readable, Writable } from 'node:stream'
 
@@ -36,9 +37,11 @@ function toolKindFor(toolName) {
  * verified; there is no fs delegation (ZCode reads and writes files itself).
  */
 export class ZcodeCodegAgent {
-  constructor(conn, { backendFactory }) {
+  constructor(conn, { backendFactory, config = null, cancelTimeoutMs = STOP_CANCEL_TIMEOUT_MS } = {}) {
     this.#conn = conn
     this.#backendFactory = backendFactory
+    this.#config = config
+    this.#cancelTimeoutMs = cancelTimeoutMs
   }
 
   async initialize(params) {
@@ -64,6 +67,16 @@ export class ZcodeCodegAgent {
     const backend = this.#backendFactory(params.cwd, this.#conn)
     const sessionId = await backend.open(params.cwd, { sessionId: params.sessionId, mcpServers: params.mcpServers ?? [] })
     this.#sessions.set(sessionId, { backend, cwd: params.cwd })
+    // With an adapter config, remember the descriptor supplier for the first
+    // resumed send; without one this stays null (relay-only mode).
+    let configDescriptor = null
+    try {
+      await backend.inspect(sessionId, '')
+      configDescriptor = buildRuntimeModel(this.#config, backend.originalModelReference(sessionId))
+    } catch {
+      configDescriptor = null
+    }
+    if (configDescriptor) this.#sessions.get(sessionId).configDescriptor = configDescriptor
     // ACP load replays history before the request returns. Only text parts
     // are replayed; counts stay bounded to protect the client connection.
     const history = await backend.messages(sessionId)
@@ -89,22 +102,58 @@ export class ZcodeCodegAgent {
     const session = this.#sessions.get(params.sessionId)
     if (!session) throw new Error('unknown session')
     const content = textFromPromptBlocks(params.prompt)
-    const result = await session.backend.prompt(params.sessionId, content, {
-      timeoutMs: DEFAULT_PROMPT_TIMEOUT_MS,
-      cancelTimeoutMs: STOP_CANCEL_TIMEOUT_MS,
-      onStream: text => {
-        void this.#conn.sessionUpdate({
-          sessionId: params.sessionId,
-          update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } },
-        }).catch(() => {})
-      },
-    })
+    // Runtime supply order: what the native side published wins; otherwise a
+    // descriptor built from the adapter config and the native-published model
+    // reference. Without either, the send goes without one (relay-only).
+    const runtimeModel = session.backend.publishedRuntimeModel(params.sessionId) ??
+      session.configDescriptor ?? null
+    let result
+    try {
+      result = await session.backend.prompt(params.sessionId, content, {
+        timeoutMs: DEFAULT_PROMPT_TIMEOUT_MS,
+        cancelTimeoutMs: this.#cancelTimeoutMs,
+        runtimeModel,
+        onStream: text => {
+          void this.#conn.sessionUpdate({
+            sessionId: params.sessionId,
+            update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } },
+          }).catch(() => {})
+        },
+      })
+    } catch (error) {
+      // The 0.16.5 stop defect makes protocol cancellation unconfirmable.
+      // Recycle the backend process and resume the native session so the
+      // session stays usable, then surface the cancellation honestly as a
+      // failed prompt - never as a fabricated `cancelled` stop reason.
+      if (error?.code === 'E_CANCEL_UNCONFIRMED' || error?.code === 'E_CLOSED') {
+        if (session.cancelRequested) {
+          const recycled = await this.#recycle(params.sessionId, session).catch(() => false)
+          const recycledError = new Error(
+            recycled ? 'cancellation unconfirmed: backend process recycled, session resumed'
+              : 'cancellation unconfirmed: backend process recycled, resume failed')
+          recycledError.code = 'E_CANCEL_RECYCLED'
+          throw recycledError
+        }
+      }
+      throw error
+    }
     return { stopReason: stopReasonFor(result) }
+  }
+
+  async #recycle(sessionId, session) {
+    try {
+      const backend = this.#backendFactory(session.cwd, this.#conn)
+      await backend.open(session.cwd, { sessionId })
+      this.#sessions.set(sessionId, { backend, cwd: session.cwd })
+      return true
+    } catch {
+      return false
+    }
   }
 
   async cancel(params) {
     const session = this.#sessions.get(params.sessionId)
-    if (session) session.backend.cancel(params.sessionId)
+    if (session && session.backend.cancel(params.sessionId)) session.cancelRequested = true
   }
 
   async closeSession(params) {
@@ -117,6 +166,8 @@ export class ZcodeCodegAgent {
 
   #conn
   #backendFactory
+  #config
+  #cancelTimeoutMs
   #sessions = new Map()
 }
 
@@ -149,14 +200,17 @@ export function permissionDelegator(conn, acpSessionId) {
   }
 }
 
-/** Stdio wiring for the adapter process. */
-export function serveOverStdio({ command, entry, env }) {
+/** Stdio wiring for the adapter process. `config` is the loaded adapter
+ * configuration (or null for relay-only mode).
+ */
+export function serveOverStdio({ command, entry, env, config = null }) {
   const toAgent = conn => new ZcodeCodegAgent(conn, {
     backendFactory: (cwd, agentConn) => new AppServerBackend({
       command, args: [entry, 'app-server', '--stdio'], cwd, env,
       timeoutMs: 10000,
       onPermission: nativeRequest => permissionDelegator(agentConn, nativeRequest.sessionId)(nativeRequest),
     }),
+    config,
   })
   const stream = ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin))
   return new AgentSideConnection(toAgent, stream)

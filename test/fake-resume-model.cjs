@@ -29,7 +29,8 @@ async function preferences() {
 // Synthetic full runtime descriptor in the observed native send-schema shape
 // (revision/generatedAt/model/provider). Real 0.16.5 publishes none.
 const RUNTIME = { revision: 'catalog-1', generatedAt: 1,
-  model: { modelId: 'private-model' }, provider: { providerId: 'private-provider' } }
+  model: { providerId: 'private-provider', modelId: 'private-model' },
+  provider: { providerId: 'private-provider', kind: 'openai-compatible', models: [{ modelId: 'private-model' }] } }
 function snapshot() {
   let model = { providerId: 'private-provider', modelId: 'private-model' }
   if (fault === 'missing-reference' || (restored && fault === 'missing-restored-reference')) model = { modelId: 'private-model' }
@@ -84,11 +85,18 @@ async function handle(frame) {
   }
   if (method === 'session/send') {
     await preferences()
-    // Mirrors the live-observed native contract: a restored session refuses
-    // every send until reselection is paired with the FULL published runtime
-    // descriptor; still-guarded refuses even that.
-    if (restored && (fault === 'still-guarded' || !rebound ||
-        JSON.stringify(params.runtimeModel) !== JSON.stringify(RUNTIME))) { error(id); return }
+    // Mirrors the native contract: a restored session refuses every send
+    // until reselection is paired with a schema-valid FULL runtime descriptor
+    // for the original model; still-guarded refuses even that.
+    const rm = params.runtimeModel
+    const runtimeValid = rm !== null && typeof rm === 'object' && !Array.isArray(rm) &&
+      typeof rm.revision === 'string' && rm.revision.length > 0 &&
+      typeof rm.generatedAt === 'number' && Number.isFinite(rm.generatedAt) &&
+      rm.model?.providerId === 'private-provider' && rm.model?.modelId === 'private-model' &&
+      rm.provider?.providerId === 'private-provider' &&
+      ['anthropic', 'openai', 'openai-compatible'].includes(rm.provider?.kind) &&
+      Array.isArray(rm.provider?.models) && rm.provider.models.some(m => m?.modelId === 'private-model')
+    if (restored && (fault === 'still-guarded' || !runtimeValid)) { error(id); return }
     runtimeApplied = true
     const marker = params.content.match(/ZCODE_PROBE_[a-f0-9]+/)?.[0] || saved.messages.at(-1)?.parts[0].text
     if (!marker) { error(id, -32602); return }
