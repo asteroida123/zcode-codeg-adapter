@@ -105,6 +105,14 @@ async function handle(frame) {
     reply(id, { session: { sessionId: fault === 'wrong-resume' ? 'wrong' : params.sessionId,
       workspace: { workspacePath: s.cwd, workspaceKey: s.cwd } } }); return
   }
+  if (method === 'session/list') {
+    reply(id, { sessions: Object.entries(sessions).map(([sid, s]) => ({
+      sessionId: sid, workspace: { workspacePath: s.cwd, workspaceKey: s.cwd },
+      title: 'Synthetic session', sessionKind: 'interactive', mode: s.mode ?? 'plan',
+      status: 'idle', createdAt: 1, updatedAt: 2, archivedAt: null,
+    })) })
+    return
+  }
   const s = sessions[params.sessionId]
   if (!s) { error(id, -32004); return }
   if (method === 'session/subscribe') {
@@ -113,7 +121,38 @@ async function handle(frame) {
     event(params.sessionId, 'turn.completed', { turnId: 'old', resultType: 'success' })
     reply(id, { eventSeq: s.seq }); return
   }
-  if (method === 'session/read') { reply(id, { projection: { status: active.has(params.sessionId) ? 'running' : 'idle' } }); return }
+  if (method === 'session/read') {
+    const model = sessions[params.sessionId].model ?? { providerId: 'builtin-x', modelId: 'fake-model' }
+    reply(id, {
+      projection: { status: active.has(params.sessionId) ? 'running' : 'idle' },
+      settings: {
+        model: {
+          current: model,
+          available: [
+            { ref: { providerId: 'builtin-x', modelId: 'fake-model' }, label: 'Fake Model' },
+            { ref: { providerId: 'builtin-x', modelId: 'fake-mini' }, label: 'Fake Mini' },
+          ],
+        },
+        mode: { current: sessions[params.sessionId].mode ?? 'plan' },
+      },
+    })
+    return
+  }
+  if (method === 'session/setMode') {
+    if (!['plan', 'build', 'edit', 'yolo', 'auto'].includes(params.mode)) { error(id, -32602); return }
+    sessions[params.sessionId].mode = params.mode
+    persist()
+    reply(id, {})
+    return
+  }
+  if (method === 'session/setModel') {
+    const model = params.model
+    if (!model || model.providerId !== 'builtin-x' || !['fake-model', 'fake-mini'].includes(model.modelId)) { error(id, -32602); return }
+    sessions[params.sessionId].model = model
+    persist()
+    reply(id, {})
+    return
+  }
   if (method === 'session/messages') { reply(id, { messages: s.messages }); return }
   if (method === 'session/stop') {
     if (fault !== 'ignore-stop') finish(params.sessionId, fault === 'stop-natural' ? 'success' : 'cancelled')
@@ -142,9 +181,14 @@ async function handle(frame) {
   if (fault === 'exit-mid-turn') { setTimeout(() => process.exit(9), 5); return }
   if (params.content.includes('deny-sentinel.txt')) {
     if (fault === 'no-permission') { finish(sid, 'success', 'no action'); return }
-    const permission = await reverse('interaction/requestPermission', { sessionId: sid, requestId: 'test', toolCallId: 'write' })
-    event(sid, 'tool.updated', { turnId, status: permission?.decision === 'deny' ? 'error' : 'result' })
-    if (permission?.decision !== 'deny' || fault === 'ignores-denial') fs.writeFileSync('deny-sentinel.txt', 'unexpected write')
+    // Realistic tool lifecycle: scheduled -> started -> permission -> outcome.
+    event(sid, 'tool.updated', { turnId, kind: 'scheduled', toolCallId: 'tool_write_1', toolName: 'write_file', input: { path: 'deny-sentinel.txt' } })
+    event(sid, 'tool.updated', { turnId, kind: 'started', toolCallId: 'tool_write_1', startedAt: 1 })
+    const permission = await reverse('interaction/requestPermission', { sessionId: sid, requestId: 'test', toolCallId: 'tool_write_1', toolName: 'write_file', riskLevel: 'medium', reason: 'write', input: { path: 'deny-sentinel.txt' } })
+    const denied = permission?.decision === 'deny'
+    event(sid, 'tool.updated', { turnId, kind: denied ? 'error' : 'result', toolCallId: 'tool_write_1',
+      ...(denied ? { error: { type: 'permission_denied', message: 'denied by client' } } : { result: { output: 'written' }, duration: 1 }) })
+    if (!denied || fault === 'ignores-denial') fs.writeFileSync('deny-sentinel.txt', 'unexpected write')
     finish(sid, 'success', 'denied'); return
   }
   const marker = params.content.match(/ZCODE_PROBE_[a-f0-9]+/)?.[0] ?? previous

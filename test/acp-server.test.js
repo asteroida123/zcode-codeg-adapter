@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { spawn } from 'node:child_process'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile, access } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -22,7 +22,7 @@ const INIT_REQUEST = {
 /** One adapter process per test. Frames are plain NDJSON JSON-RPC; the ACP
  * session id equals the native session id, which the synthetic CLI accepts.
  */
-async function start(t, { fault = '', config = null, cli = fake } = {}) {
+async function start(t, { fault = '', config = null, cli = fake, permission = 'deny' } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'zcode-acp-test-'))
   const env = {
     ...process.env, ZCODE_CODEG_ENTRY: cli, FAKE_ZCODE_FAULT: fault, TMPDIR: undefined,
@@ -40,6 +40,7 @@ async function start(t, { fault = '', config = null, cli = fake } = {}) {
   })
   const pending = new Map()
   const updates = []
+  const permissions = []
   let nextId = 10
   const lines = createInterface({ input: child.stdout })
   lines.on('line', line => {
@@ -51,6 +52,14 @@ async function start(t, { fault = '', config = null, cli = fake } = {}) {
       return
     }
     if (frame.method === 'session/update') updates.push(frame.params)
+    // The adapter delegates permission decisions to the client; this harness
+    // answers with the scenario's fixed choice.
+    if (frame.method === 'session/request_permission') {
+      permissions.push(frame.params)
+      const optionId = permission === 'allow' ? 'allow_once' : 'deny_once'
+      child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: frame.id,
+        result: { outcome: { outcome: 'selected', optionId } } }) + '\n')
+    }
   })
   const request = (method, params) => {
     const id = nextId++
@@ -72,7 +81,7 @@ async function start(t, { fault = '', config = null, cli = fake } = {}) {
     child.kill('SIGKILL')
     await rm(cwd, { recursive: true, force: true, maxRetries: 3 })
   })
-  return { child, request, notification, updates, init, cwd }
+  return { child, request, notification, updates, permissions, init, cwd }
 }
 
 test('ACP: initialize negotiates protocol version and honest capabilities only', async t => {
@@ -192,4 +201,74 @@ test('ACP: unconfirmed cancellation recycles the backend and the session survive
   assert.equal(again.stopReason, 'end_turn')
   const closed = await agent.closeSession({ sessionId })
   assert.ok(closed !== undefined || true)
+})
+
+test('ACP: tool lifecycle streams as tool_call then tool_call_update with deny effect', async t => {
+  const { request, updates, permissions, cwd } = await start(t, { permission: 'deny' })
+  const created = await request('session/new', { cwd, mcpServers: [] })
+  const sessionId = created.result.sessionId
+  const prompted = await request('session/prompt', {
+    sessionId, prompt: [{ type: 'text', text: 'Write deny-sentinel.txt once' }],
+  })
+  assert.equal(prompted.result?.stopReason, 'end_turn')
+  assert.equal(permissions.length, 1)
+  assert.equal(permissions[0].toolCall?.title, 'write_file')
+  const kinds = updates.filter(update => update.sessionId === sessionId)
+    .map(update => update.update?.sessionUpdate)
+  assert.deepEqual(kinds.filter(kind => kind?.startsWith('tool_call')), ['tool_call', 'tool_call_update', 'tool_call_update'])
+  const first = updates.find(update => update.update?.sessionUpdate === 'tool_call')
+  assert.equal(first.update.toolCallId, 'tool_write_1')
+  assert.equal(first.update.status, 'pending')
+  assert.equal(first.update.kind, 'edit')
+  assert.deepEqual(first.update.rawInput, { path: 'deny-sentinel.txt' })
+  const last = updates.filter(update => update.update?.sessionUpdate === 'tool_call_update').at(-1)
+  assert.equal(last.update.status, 'failed')
+  await assert.rejects(access(join(cwd, 'deny-sentinel.txt')), { code: 'ENOENT' })
+})
+
+test('ACP: allow decision writes the file and completes the tool', async t => {
+  const { request, updates, cwd } = await start(t, { permission: 'allow' })
+  const created = await request('session/new', { cwd, mcpServers: [] })
+  const prompted = await request('session/prompt', {
+    sessionId: created.result.sessionId, prompt: [{ type: 'text', text: 'Write deny-sentinel.txt once' }],
+  })
+  assert.equal(prompted.result?.stopReason, 'end_turn')
+  const last = updates.filter(update => update.update?.sessionUpdate === 'tool_call_update').at(-1)
+  assert.equal(last.update.status, 'completed')
+  const written = await readFile(join(cwd, 'deny-sentinel.txt'), 'utf8')
+  assert.equal(written, 'unexpected write')
+})
+
+test('ACP: modes and the model selector are advertised and applied natively', async t => {
+  const { request, updates, cwd } = await start(t)
+  const created = await request('session/new', { cwd, mcpServers: [] })
+  assert.deepEqual(created.result.modes?.availableModes, [{ id: 'plan', name: 'Plan' }, { id: 'build', name: 'Build' }])
+  assert.equal(created.result.modes?.currentModeId, 'plan')
+  const modelOption = created.result.configOptions?.find(option => option.id === 'model')
+  assert.equal(modelOption?.type, 'select')
+  assert.equal(modelOption.currentValue, 'builtin-x/fake-model')
+  assert.deepEqual(modelOption.options.map(option => option.value).sort(), ['builtin-x/fake-mini', 'builtin-x/fake-model'])
+  const switched = await request('session/set_config_option', {
+    sessionId: created.result.sessionId, configId: 'model', value: 'builtin-x/fake-mini',
+  })
+  assert.ok(switched.result?.configOptions, JSON.stringify(switched).slice(0, 300))
+  const switchedOption = switched.result?.configOptions?.find(option => option.id === 'model')
+  assert.equal(switchedOption?.currentValue, 'builtin-x/fake-mini')
+  const mode = await request('session/set_mode', {
+    sessionId: created.result.sessionId, modeId: 'build',
+  })
+  assert.equal(mode.error, undefined)
+  const modeUpdate = updates.find(update => update.update?.sessionUpdate === 'current_mode_update')
+  assert.equal(modeUpdate?.update?.currentModeId, 'build')
+})
+
+test('ACP: session list mirrors the native store', async t => {
+  const { request, cwd } = await start(t)
+  const created = await request('session/new', { cwd, mcpServers: [] })
+  const listed = await request('session/list', { cwd })
+  assert.equal(listed.error, undefined)
+  const ids = (listed.result?.sessions ?? []).map(session => session.sessionId)
+  assert.ok(ids.includes(created.result.sessionId))
+  const entry = listed.result.sessions.find(session => session.sessionId === created.result.sessionId)
+  assert.equal(entry.title, 'Synthetic session')
 })

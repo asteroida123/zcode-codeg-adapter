@@ -103,6 +103,79 @@ export class AppServerBackend {
     return history.messages
   }
 
+  /** Model selector options from the native snapshot. Entries are parsed
+   * defensively (`ref.providerId` and flat `providerId` layouts both occur);
+   * unparseable entries are skipped, never guessed.
+   */
+  async modelOptions(id) {
+    this.state(id)
+    const snapshot = await this.rpc.request('session/read', { sessionId: id })
+    const available = snapshot?.settings?.model?.available
+    if (!Array.isArray(available)) return []
+    const options = []
+    for (const entry of available.slice(0, 64)) {
+      if (!object(entry)) continue
+      const ref = object(entry.ref) ? entry.ref : entry
+      if (idValue(ref.providerId) && idValue(ref.modelId)) {
+        options.push({
+          providerId: ref.providerId, modelId: ref.modelId,
+          ...(idValue(entry.label) ? { label: entry.label } : {}),
+        })
+      }
+    }
+    return options
+  }
+
+  async currentModel(id) {
+    this.state(id)
+    const snapshot = await this.rpc.request('session/read', { sessionId: id })
+    return modelReferenceFromSnapshot(snapshot)
+  }
+
+  /** Switch the session mode (native plan/build/edit/yolo/auto enum). */
+  async setMode(id, mode) {
+    this.state(id)
+    if (!idValue(mode)) throw new ProbeError('E_MODE')
+    await this.rpc.request('session/setMode', { sessionId: id, mode })
+    return { mode }
+  }
+
+  /** Switch the session model (session-scoped, no workspace persistence). */
+  async setModel(id, reference) {
+    this.state(id)
+    if (!object(reference) || !idValue(reference.providerId) || !idValue(reference.modelId)) {
+      throw new ProbeError('E_RESUME_MODEL_REFERENCE')
+    }
+    await this.rpc.request('session/setModel', {
+      sessionId: id,
+      model: { providerId: reference.providerId, modelId: reference.modelId },
+      persistAsWorkspaceLastUsed: false,
+    })
+    const current = await this.currentModel(id)
+    if (!current || current.providerId !== reference.providerId || current.modelId !== reference.modelId) {
+      throw new ProbeError('E_RESUME_MODEL_CHANGED')
+    }
+    return { model: reference }
+  }
+
+  /** Native session listing for the ACP mirror. Uses the first ready
+   * session's transport; entries are passed through with allowlisted fields.
+   */
+  async listSessions({ limit = 50 } = {}) {
+    const ready = [...this.sessions.values()].find(state => state.ready)
+    if (!ready) throw new ProbeError('E_SESSION_ID')
+    const result = await this.rpc.request('session/list', {
+      directory: ready.cwd, limit,
+    })
+    if (!Array.isArray(result?.sessions)) throw new ProbeError('E_SCHEMA')
+    return result.sessions.slice(0, limit).map(entry => ({
+      sessionId: idValue(entry?.sessionId) ? entry.sessionId : null,
+      cwd: idValue(entry?.workspace?.workspacePath) ? entry.workspace.workspacePath : null,
+      title: idValue(entry?.title) ? entry.title : null,
+      updatedAt: entry?.updatedAt !== undefined && entry.updatedAt !== null ? String(entry.updatedAt) : null,
+    })).filter(entry => entry.sessionId !== null)
+  }
+
   async inspect(id, marker = '') {
     this.state(id)
     const state = await this.rpc.request('session/read', { sessionId: id })
@@ -143,7 +216,7 @@ export class AppServerBackend {
     return rebindOriginalModel(this.rpc, id, original)
   }
 
-  prompt(id, content, { timeoutMs = 30000, cancelOnStream = false, cancelTimeoutMs = 3000, closeOnCancelTimeout = true, runtimeModel = null, onStream = null } = {}) {
+  prompt(id, content, { timeoutMs = 30000, cancelOnStream = false, cancelTimeoutMs = 3000, closeOnCancelTimeout = true, runtimeModel = null, onStream = null, onToolEvent = null } = {}) {
     const state = this.state(id)
     if (state.active) return Promise.reject(new ProbeError('E_BUSY'))
     if (this.rpc.failure || this.rpc.closing) return Promise.reject(new ProbeError('E_CLOSED'))
@@ -159,6 +232,8 @@ export class AppServerBackend {
       const turn = { accepted: false, started: false, turnId: null, terminal: null, cancelSent: false,
         streams: 0, tools: 0, denied: 0, cancelOnStream, cancelTimeoutMs, closeOnCancelTimeout,
         onStream: typeof onStream === 'function' ? onStream : null,
+        onToolEvent: typeof onToolEvent === 'function' ? onToolEvent : null,
+        toolCallIds: new Set(),
         startCount: 0, firstStartIdentity: null,
         timer: null, cancelTimer: null, settled: false, finish: null }
       turn.finish = (error, result) => {
@@ -268,7 +343,13 @@ export class AppServerBackend {
       }
       if (turn.accepted && turn.cancelOnStream) this.cancel(params.sessionId)
     } else if (params.type === 'tool.updated') {
-      turn.tools++
+      // tools counts DISTINCT tool calls: one native call emits several
+      // lifecycle events (scheduled/started/progress/result/error).
+      if (idValue(params.payload.toolCallId) && !turn.toolCallIds.has(params.payload.toolCallId)) {
+        turn.toolCallIds.add(params.payload.toolCallId)
+        turn.tools++
+      }
+      if (typeof turn.onToolEvent === 'function') turn.onToolEvent(params.payload)
     } else if (['turn.completed', 'turn.failed'].includes(params.type)) {
       turn.terminal = params
       this.complete(turn)
