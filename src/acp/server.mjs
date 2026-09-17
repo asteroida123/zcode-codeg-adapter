@@ -358,12 +358,25 @@ export class ZcodeCodegAgent {
 /** Client-side permission delegation over ACP. The client's option selection
  * is the only path to an allow; a cancelled or malformed outcome denies.
  */
+// The ACP permission-option kind is a CLOSED enum (allow_once / allow_always /
+// reject_once / reject_always); a client that receives any other tag fails to
+// deserialize the whole request and tears the connection down as a protocol
+// error. ZCode's native menu carries kinds outside that enum (e.g. 'deny'), so
+// every native kind is mapped to the closest standard choice before it goes
+// on the wire — never passed through verbatim.
+const ACP_PERMISSION_KINDS = new Set(['allow_once', 'allow_always', 'reject_once', 'reject_always'])
+export function toAcpPermissionKind(kind) {
+  if (ACP_PERMISSION_KINDS.has(kind)) return kind
+  if (typeof kind === 'string' && kind.startsWith('allow')) return 'allow_once'
+  return 'reject_once'
+}
+
 export function permissionDelegator(conn, acpSessionId) {
   return async nativeRequest => {
     const options = (Array.isArray(nativeRequest.options) ? nativeRequest.options : [])
       .filter(option => option && idValue(option.optionId) && idValue(option.kind))
       .slice(0, 8)
-      .map(option => ({ optionId: option.optionId, kind: option.kind, name: idValue(option.name) ? option.name : option.optionId }))
+      .map(option => ({ optionId: option.optionId, kind: toAcpPermissionKind(option.kind), name: idValue(option.name) ? option.name : option.optionId }))
     // The client chooses from THIS list, so the response is matched against
     // it - including when native supplies none and defaults are offered.
     const request = {

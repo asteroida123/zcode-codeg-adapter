@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createInterface } from 'node:readline'
 import { AppServerBackend } from '../src/backend/backend.mjs'
-import { ZcodeCodegAgent } from '../src/acp/server.mjs'
+import { ZcodeCodegAgent, permissionDelegator } from '../src/acp/server.mjs'
 
 const bin = fileURLToPath(new URL('../bin/zcode-codeg-acp.js', import.meta.url))
 const fake = fileURLToPath(new URL('./fake-zcode.cjs', import.meta.url))
@@ -237,6 +237,26 @@ test('ACP: allow decision writes the file and completes the tool', async t => {
   assert.equal(last.update.status, 'completed')
   const written = await readFile(join(cwd, 'deny-sentinel.txt'), 'utf8')
   assert.equal(written, 'unexpected write')
+})
+
+test('ACP: native permission kinds outside the ACP enum are mapped, not passed through', async t => {
+  const { request, cwd } = await start(t)
+  const created = await request('session/new', { cwd, mcpServers: [] })
+  // 直接驱动 delegator：构造带非标 kind 的原生请求，断言线上形状只含合法枚举
+  let wireShape = null
+  const delegator = permissionDelegator({ requestPermission: async req => { wireShape = req; return { outcome: { outcome: 'selected', optionId: 'deny' } } } }, 'sess_x')
+  const native = {
+    sessionId: 'sess_x', toolCallId: 'call_1', toolName: 'Write', input: { a: 1 },
+    options: [
+      { optionId: 'allow', kind: 'allow', name: 'Allow' },
+      { optionId: 'allow_project', kind: 'allow_project', name: 'Always in project' },
+      { optionId: 'deny', kind: 'deny', name: 'Deny' },
+    ],
+  }
+  const decision = await delegator(native)
+  assert.deepEqual(decision, { decision: 'deny', reason: 'client selected deny' })
+  const kinds = (wireShape?.options ?? []).map(option => option.kind)
+  assert.deepEqual(kinds, ['allow_once', 'allow_once', 'reject_once'])
 })
 
 test('ACP: the mode and model selectors are advertised and applied natively', async t => {
