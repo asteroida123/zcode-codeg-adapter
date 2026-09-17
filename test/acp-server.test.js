@@ -239,11 +239,16 @@ test('ACP: allow decision writes the file and completes the tool', async t => {
   assert.equal(written, 'unexpected write')
 })
 
-test('ACP: modes and the model selector are advertised and applied natively', async t => {
+test('ACP: the mode and model selectors are advertised and applied natively', async t => {
   const { request, updates, cwd } = await start(t)
   const created = await request('session/new', { cwd, mcpServers: [] })
-  assert.deepEqual(created.result.modes?.availableModes, [{ id: 'plan', name: 'Plan' }, { id: 'build', name: 'Build' }])
-  assert.equal(created.result.modes?.currentModeId, 'plan')
+  // No ACP `modes` block: codeg hides the modes selector when configOptions
+  // exist, so plan/build must ride a configOption to stay reachable there.
+  assert.equal(created.result.modes, undefined)
+  const modeOption = created.result.configOptions?.find(option => option.id === 'mode')
+  assert.equal(modeOption?.type, 'select')
+  assert.equal(modeOption.currentValue, 'plan')
+  assert.deepEqual(modeOption.options, [{ value: 'plan', name: 'Plan' }, { value: 'build', name: 'Build' }])
   const modelOption = created.result.configOptions?.find(option => option.id === 'model')
   assert.equal(modelOption?.type, 'select')
   assert.equal(modelOption.currentValue, 'builtin-x/fake-model')
@@ -260,6 +265,15 @@ test('ACP: modes and the model selector are advertised and applied natively', as
   assert.equal(mode.error, undefined)
   const modeUpdate = updates.find(update => update.update?.sessionUpdate === 'current_mode_update')
   assert.equal(modeUpdate?.update?.currentModeId, 'build')
+  const modeSwitched = await request('session/set_config_option', {
+    sessionId: created.result.sessionId, configId: 'mode', value: 'plan',
+  })
+  const modeAfter = modeSwitched.result?.configOptions?.find(option => option.id === 'mode')
+  assert.equal(modeAfter?.currentValue, 'plan')
+  const modeRejected = await request('session/set_config_option', {
+    sessionId: created.result.sessionId, configId: 'mode', value: 'yolo',
+  })
+  assert.ok(modeRejected.error, 'an off-menu mode value must be rejected')
 })
 
 test('ACP: session list mirrors the native store', async t => {

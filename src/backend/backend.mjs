@@ -132,6 +132,15 @@ export class AppServerBackend {
     return modelReferenceFromSnapshot(snapshot)
   }
 
+  /** Current native session mode (settings.mode.current), or null when the
+   * snapshot does not carry one. */
+  async currentMode(id) {
+    this.state(id)
+    const snapshot = await this.rpc.request('session/read', { sessionId: id })
+    const mode = snapshot?.settings?.mode?.current
+    return typeof mode === 'string' && mode.length > 0 ? mode : null
+  }
+
   /** Switch the session mode (native plan/build/edit/yolo/auto enum). */
   async setMode(id, mode) {
     this.state(id)

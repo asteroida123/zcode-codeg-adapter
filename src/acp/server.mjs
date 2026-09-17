@@ -74,12 +74,15 @@ export class ZcodeCodegAgent {
     }
   }
 
-  /** Session-mode advertisement plus the model selector, both fed from the
-   * native snapshot. A read failure degrades to modes-only; it never fakes
-   * options.
+  /** Mode and model selectors, both fed from the native snapshot and both
+   * carried as configOptions. ACP `modes` is deliberately NOT advertised:
+   * codeg's composer hides the modes selector whenever configOptions exist,
+   * so a modes block would leave plan/build unreachable from the UI — the
+   * mode configOption is the shape qoder ships for the same reason. A read
+   * failure degrades to whichever option resolved; it never fakes values.
    */
   async #sessionOptions(session) {
-    const options = { modes: { currentModeId: 'plan', availableModes: AGENT_MODES } }
+    const options = {}
     try {
       const models = await session.backend.modelOptions(session.sessionId)
       const current = await session.backend.currentModel(session.sessionId)
@@ -105,7 +108,20 @@ export class ZcodeCodegAgent {
         }
       }
     } catch {
-      // Modes-only advertisement; no fabricated model options.
+      // No fabricated model options.
+    }
+    try {
+      const currentMode = await session.backend.currentMode(session.sessionId)
+      options.configOptions = [
+        ...(options.configOptions ?? []),
+        {
+          id: 'mode', type: 'select', name: 'Mode',
+          currentValue: currentMode ?? 'plan',
+          options: AGENT_MODES.map(mode => ({ value: mode.id, name: mode.name })),
+        },
+      ]
+    } catch {
+      // No fabricated mode option.
     }
     return options
   }
@@ -158,6 +174,16 @@ export class ZcodeCodegAgent {
   async setSessionConfigOption(params) {
     const session = this.#sessions.get(params.sessionId)
     if (!session) throw new Error('unknown session')
+    if (params.configId === 'mode') {
+      const mode = String(params.value)
+      if (!AGENT_MODES.some(entry => entry.id === mode)) throw new Error('unknown mode')
+      const applied = await session.backend.setMode(params.sessionId, mode)
+      await this.#conn.sessionUpdate({
+        sessionId: params.sessionId,
+        update: { sessionUpdate: 'current_mode_update', currentModeId: applied.mode },
+      }).catch(() => {})
+      return this.#sessionOptions(session)
+    }
     if (params.configId !== 'model') throw new Error('unknown config option')
     const separator = String(params.value).indexOf('/')
     if (separator <= 0) throw new Error('malformed model option value')
