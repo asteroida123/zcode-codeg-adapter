@@ -1,6 +1,6 @@
 {
   "npx": {
-    "package": "zcode-codeg-adapter@0.1.2",
+    "package": "zcode-codeg-adapter@0.1.3",
     "cmd": "zcode-codeg-acp",
     "args": [],
     "env": {},

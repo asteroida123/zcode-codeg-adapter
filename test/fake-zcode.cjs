@@ -20,6 +20,7 @@ function reverse(method, params) {
   const id = reverseId++
   return new Promise(resolve => { backwards.set(id, resolve); send({ id, method, params }) })
 }
+const registeredProviders = new Set()
 function persist() { fs.writeFileSync(storage, JSON.stringify(sessions)) }
 // Envelope-level turnId is the verified real-CLI layout; the payload-turn-id
 // fault keeps the versioned fallback path covered. Identity-less turns are
@@ -113,6 +114,19 @@ async function handle(frame) {
     })) })
     return
   }
+  if (method === 'workspace/updateProviderRegistry') {
+    // FAKE_NO_REGISTRY=1 mirrors 0.16.5: no such method at all.
+    if (process.env.FAKE_NO_REGISTRY === '1') { error(id, -32601); return }
+    const providers = params?.registry?.providers
+    if (!Array.isArray(providers) || providers.length === 0) { error(id, -32602); return }
+    for (const entry of providers) {
+      if (!entry?.providerId || !Array.isArray(entry.models) || entry.models.length === 0) { error(id, -32602); return }
+      if (entry.apiKey !== undefined && entry.apiKey.source !== 'inline') { error(id, -32602); return }
+      registeredProviders.add(entry.providerId)
+    }
+    reply(id, {})
+    return
+  }
   const s = sessions[params.sessionId]
   if (!s) { error(id, -32004); return }
   if (method === 'session/subscribe') {
@@ -122,7 +136,7 @@ async function handle(frame) {
     reply(id, { eventSeq: s.seq }); return
   }
   if (method === 'session/read') {
-    const model = sessions[params.sessionId].model ?? { providerId: 'builtin-x', modelId: 'fake-model' }
+    const model = sessions[params.sessionId].model ?? { providerId: 'builtin-x', modelId: 'fake-model', options: { reasoningLevel: 'high' } }
     reply(id, {
       projection: { status: active.has(params.sessionId) ? 'running' : 'idle' },
       settings: {
@@ -147,7 +161,14 @@ async function handle(frame) {
   }
   if (method === 'session/setModel') {
     const model = params.model
-    if (!model || model.providerId !== 'builtin-x' || !['fake-model', 'fake-mini'].includes(model.modelId)) { error(id, -32602); return }
+    // The legacy pair plus any provider the host registered via
+    // workspace/updateProviderRegistry — the real backend likewise refuses
+    // unregistered third-party providers with provider_not_configured.
+    const known = model && model.providerId === 'builtin-x' && ['fake-model', 'fake-mini'].includes(model.modelId)
+    const registered = model && registeredProviders.has(model.providerId)
+    if (!known && !registered) { error(id, -32602); return }
+    // Mirrors 0.16.5: the model ref must carry options.reasoningLevel.
+    if (!model.options?.reasoningLevel) { error(id, -32603); return }
     sessions[params.sessionId].model = model
     persist()
     reply(id, {})

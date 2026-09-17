@@ -3,6 +3,9 @@ import { PrivateRpc } from './rpc.mjs'
 import { ProbeError, object } from './errors.mjs'
 import { identityShape, turnIdentity } from './turn-evidence.mjs'
 import { modelReferenceFromSnapshot, modelRuntimeFromSnapshot, rebindOriginalModel } from './resume-model.mjs'
+import {
+  buildProviderRegistry, buildRuntimeModel, readZcodeConfig, selectableModelCatalog,
+} from './zcode-config.mjs'
 import { restoreWarningIndicator } from './diagnostics.mjs'
 
 export const PROFILE = 'app-server-cli-0.16.5-candidate'
@@ -29,6 +32,14 @@ export class AppServerBackend {
   constructor(options) {
     this.sessions = new Map()
     this.permissionMode = options.permissionMode === 'hold' ? 'hold' : 'deny'
+    // ZCode 桌面配置源（完整模型目录 / provider registry）。可注入覆盖供
+    // 测试；默认读 ~/.zcode/v2/config.json，读失败优雅回退快照目录。
+    this.loadZcodeConfig = typeof options.zcodeConfig === 'function' ? options.zcodeConfig : readZcodeConfig
+    // Provider-registry capability, probed per backend connection: V4-era
+    // backends expose workspace/updateProviderRegistry (third-party model
+    // switching needs the push + a runtimeModel overlay); 0.16.5 answers
+    // -32601 and only knows session/setModel with model.options.reasoningLevel.
+    this.providerRegistrySupported = null
     // Production permission seam: when present, decisions come from this
     // callback (the ACP client). Absent (probe default) -> deny/hold rules.
     this.onPermission = typeof options.onPermission === 'function' ? options.onPermission : null
@@ -70,6 +81,38 @@ export class AppServerBackend {
     } catch (error) {
       this.sessions.delete(id)
       throw error // Never create a replacement session on a failed resume.
+    } finally {
+      // The backend does not auto-load providers from config.json: without
+      // this push, switching to a third-party provider fails with
+      // provider_not_configured. Best-effort only — a sync failure never
+      // blocks the session (mirrors the upstream bridge's semantics).
+      await this.#syncProviderRegistry(cwd).catch(() => {})
+    }
+  }
+
+  /** Push the provider registry for a workspace (V4-era backends only).
+   * Skipped when the config is unreadable or holds no model-bearing provider
+   * (an empty payload would CLEAR previously synced providers — the backend
+   * applies replace-style). A -32601 flips the capability off for this
+   * connection; other failures leave it undecided and never block the session. */
+  async #syncProviderRegistry(cwd) {
+    if (this.providerRegistrySupported === false) return
+    const cfg = await this.loadZcodeConfig()
+    const registry = buildProviderRegistry(cfg)
+    if (!registry) return
+    const canonical = await realpath(cwd)
+    try {
+      await this.rpc.request('workspace/updateProviderRegistry', {
+        workspace: { workspacePath: canonical, workspaceKey: canonical },
+        registry,
+      })
+      this.providerRegistrySupported = true
+    } catch (error) {
+      if (error instanceof ProbeError && error.rpcCode === -32601) {
+        this.providerRegistrySupported = false
+        return
+      }
+      throw error
     }
   }
 
@@ -110,19 +153,32 @@ export class AppServerBackend {
   async modelOptions(id) {
     this.state(id)
     const snapshot = await this.rpc.request('session/read', { sessionId: id })
-    const available = snapshot?.settings?.model?.available
-    if (!Array.isArray(available)) return []
+    // The snapshot's available-list carries only the session's current model
+    // on real backends; the FULL catalog lives in the desktop config. Merge
+    // config (primary) with the snapshot (labels + current fallback) so a
+    // missing config degrades to today's behavior instead of an empty list.
     const options = []
-    for (const entry of available.slice(0, 64)) {
-      if (!object(entry)) continue
-      const ref = object(entry.ref) ? entry.ref : entry
-      if (idValue(ref.providerId) && idValue(ref.modelId)) {
-        options.push({
-          providerId: ref.providerId, modelId: ref.modelId,
-          ...(idValue(entry.label) ? { label: entry.label } : {}),
-        })
+    const seen = new Set()
+    const push = (providerId, modelId, label) => {
+      const value = `${providerId}/${modelId}`
+      if (seen.has(value) || seen.size >= 128) return
+      seen.add(value)
+      options.push({ providerId, modelId, ...(idValue(label) ? { label } : {}) })
+    }
+    const cfg = await this.loadZcodeConfig()
+    for (const entry of selectableModelCatalog(cfg).slice(0, 128)) {
+      push(entry.providerId, entry.modelId, `${entry.providerName} · ${entry.modelId}`)
+    }
+    const available = snapshot?.settings?.model?.available
+    if (Array.isArray(available)) {
+      for (const entry of available.slice(0, 64)) {
+        if (!object(entry)) continue
+        const ref = object(entry.ref) ? entry.ref : entry
+        if (idValue(ref.providerId) && idValue(ref.modelId)) push(ref.providerId, ref.modelId, entry.label)
       }
     }
+    const current = modelReferenceFromSnapshot(snapshot)
+    if (current) push(current.providerId, current.modelId)
     return options
   }
 
@@ -149,15 +205,29 @@ export class AppServerBackend {
     return { mode }
   }
 
-  /** Switch the session model (session-scoped, no workspace persistence). */
+  /** Switch the session model (session-scoped, no workspace persistence).
+   * Carries the runtimeModel overlay whenever the desktop config knows the
+   * provider — third-party providers fail with 401 provider_not_configured
+   * without it (the backend resolves auth from the overlay, not config.json). */
   async setModel(id, reference) {
     this.state(id)
     if (!object(reference) || !idValue(reference.providerId) || !idValue(reference.modelId)) {
       throw new ProbeError('E_RESUME_MODEL_REFERENCE')
     }
+    const cfg = await this.loadZcodeConfig()
+    // 0.16.5 schema: the model ref carries options.reasoningLevel (echoed from
+    // the session's current selection — switching is registry-bound there
+    // anyway, and V4 backends accept the field too). The runtimeModel overlay
+    // rides along only when the backend advertised the provider registry.
+    const snapshot = await this.rpc.request('session/read', { sessionId: id })
+    const reasoningLevel = snapshot?.settings?.model?.current?.options?.reasoningLevel
+    const model = { providerId: reference.providerId, modelId: reference.modelId }
+    if (idValue(reasoningLevel)) model.options = { reasoningLevel }
+    const overlay = this.providerRegistrySupported === true ? buildRuntimeModel(cfg, reference) : null
     await this.rpc.request('session/setModel', {
       sessionId: id,
-      model: { providerId: reference.providerId, modelId: reference.modelId },
+      model,
+      ...(overlay ? { runtimeModel: overlay } : {}),
       persistAsWorkspaceLastUsed: false,
     })
     const current = await this.currentModel(id)

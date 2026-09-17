@@ -26,6 +26,9 @@ async function start(t, { fault = '', config = null, cli = fake, permission = 'd
   const cwd = await mkdtemp(join(tmpdir(), 'zcode-acp-test-'))
   const env = {
     ...process.env, ZCODE_CODEG_ENTRY: cli, FAKE_ZCODE_FAULT: fault, TMPDIR: undefined,
+    // 隔离 ZCode 桌面配置：完整模型目录来自 $HOME/.zcode/v2/config.json，
+    // 读到宿主机真实配置会让模型列表断言随机器漂移。
+    HOME: cwd, USERPROFILE: cwd,
   }
   let configPath
   if (config) {
@@ -135,7 +138,7 @@ test('ACP: session/load replays user and assistant history before returning', as
 test('ACP: missing CLI entry fails fast without faking a session', async t => {
   const cwd = await mkdtemp(join(tmpdir(), 'zcode-acp-missing-'))
   t.after(async () => { await rm(cwd, { recursive: true, force: true, maxRetries: 3 }) })
-  const child = spawn(process.execPath, [bin], { cwd, env: { ...process.env, ZCODE_CODEG_ENTRY: '' }, stdio: ['pipe', 'pipe', 'pipe'] })
+  const child = spawn(process.execPath, [bin], { cwd, env: { ...process.env, ZCODE_CODEG_ENTRY: '', HOME: cwd, USERPROFILE: cwd }, stdio: ['pipe', 'pipe', 'pipe'] })
   let stderr = ''
   child.stderr.on('data', bytes => { stderr += bytes })
   const code = await new Promise(resolve => child.once('exit', (code) => resolve(code)))
