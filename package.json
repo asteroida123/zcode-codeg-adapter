@@ -1,5 +1,5 @@
 {
-  "name": "@asteroida123/zcode-codeg-adapter",
+  "name": "zcode-codeg-adapter",
   "version": "0.1.0",
   "description": "A pinned, stdio-only ZCode ACP launch profile for Codeg; no protocol fork.",
   "type": "module",

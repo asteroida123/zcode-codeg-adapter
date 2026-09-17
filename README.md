@@ -40,7 +40,7 @@ node bin/zcode-codeg.js doctor
 
 本包不需要构建步骤。`--ignore-scripts` 避免执行依赖的安装生命周期脚本（包括上游的 hub 升级通知）；不要为这个薄适配器增加 postinstall 下载器或自动更新器。首次安装需要访问 npm。项目自身的 `.npmrc` 不会强制约束调用方在全局安装/npx 场景中的配置，外部安装仍需显式使用 `--ignore-scripts`。
 
-尚未发布到 npm；不要使用 `npm install @asteroida123/zcode-codeg-adapter` 当作已发布包安装。
+尚未发布到 npm；不要使用 `npm install zcode-codeg-adapter` 当作已发布包安装。
 
 ## 在 Codeg 中接入
 

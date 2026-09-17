@@ -1,6 +1,6 @@
 {
   "npx": {
-    "package": "@asteroida123/zcode-codeg-adapter@0.1.0",
+    "package": "zcode-codeg-adapter@0.1.0",
     "cmd": "zcode-codeg-acp",
     "args": [],
     "env": {},
