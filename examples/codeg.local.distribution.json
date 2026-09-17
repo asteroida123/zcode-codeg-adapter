@@ -1,11 +1,9 @@
 {
   "npx": {
     "package": "file:/ABSOLUTE/PATH/TO/zcode-codeg-adapter",
-    "cmd": "zcode-codeg",
+    "cmd": "zcode-codeg-acp",
     "args": [],
-    "env": {
-      "ZCODE_ACP_LANG": "zh"
-    },
+    "env": {},
     "node_required": "22.16.0"
   }
 }
