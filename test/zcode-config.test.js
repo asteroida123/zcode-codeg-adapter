@@ -105,6 +105,13 @@ async function start(t, { zcodeHomeConfig, noRegistry = false } = {}) {
   t.after(() => { try { child.kill() } catch {} })
   let nextId = 1
   const pending = new Map()
+  // An adapter that dies at boot (missing dependency, E_ENTRY, crash) must
+  // fail its pending requests instead of leaving them pending forever — the
+  // hang runs to the test-runner/job timeout otherwise.
+  child.on('exit', () => {
+    for (const { reject } of pending.values()) reject(new Error('adapter exited before answering'))
+    pending.clear()
+  })
   child.stdout.on('data', chunk => {
     for (const line of chunk.toString().split('\n')) {
       if (!line.trim()) continue

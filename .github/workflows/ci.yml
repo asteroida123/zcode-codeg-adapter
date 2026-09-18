@@ -37,12 +37,17 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ matrix.node }}
+      # The ACP core and the legacy launcher both carry real dependencies now
+      # (@agentclientprotocol/sdk, zcode-acp-server); every check below imports
+      # them, so the locked install must come FIRST — the suite was zero-dep
+      # when this workflow was written, and running it without node_modules
+      # failed fast on Node 22 and hung to the job timeout on Node 25.
+      - name: Install locked dependencies (no lifecycle scripts)
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run check
       - run: npm test
       - run: npm run test:mutations
       - run: npm run probe:backend
-      - name: Install locked upstream (no lifecycle scripts)
-        run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run test:upstream
       - name: Verify published file set includes the dependency lock
         shell: bash
