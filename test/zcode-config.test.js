@@ -3,6 +3,7 @@ import test from 'node:test'
 import { mkdtemp, mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import {
   buildProviderRegistry, buildRuntimeModel, selectableModelCatalog, zcodeConfigPath,
@@ -90,8 +91,11 @@ test('config path lives under $HOME/.zcode/v2', () => {
 // （spawn 的是真适配器进程，fake-zcode 充当原生后端；config.json 写进隔离的
 // HOME，覆盖"目录来自 config、快照只补当前模型"的合并路径。）
 
-const bin = new URL('../bin/zcode-codeg-acp.js', import.meta.url).pathname
-const fake = new URL('./fake-zcode.cjs', import.meta.url).pathname
+// fileURLToPath, not URL.pathname: on Windows the raw pathname keeps a
+// leading slash (/D:/...) and spawn ENOENTs — the suite hung to the CI job
+// timeout there before this matched the repo's other test files.
+const bin = fileURLToPath(new URL('../bin/zcode-codeg-acp.js', import.meta.url))
+const fake = fileURLToPath(new URL('./fake-zcode.cjs', import.meta.url))
 
 async function start(t, { zcodeHomeConfig, noRegistry = false } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'zcode-cfg-test-'))
@@ -110,6 +114,10 @@ async function start(t, { zcodeHomeConfig, noRegistry = false } = {}) {
   // hang runs to the test-runner/job timeout otherwise.
   child.on('exit', () => {
     for (const { reject } of pending.values()) reject(new Error('adapter exited before answering'))
+    pending.clear()
+  })
+  child.on('error', error => {
+    for (const { reject } of pending.values()) reject(new Error(`adapter failed to spawn: ${error.message}`))
     pending.clear()
   })
   child.stdout.on('data', chunk => {
