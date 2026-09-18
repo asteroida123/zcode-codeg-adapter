@@ -31,6 +31,18 @@ function killTree(child) {
     try { stream?.destroy() } catch {}
   }
 }
+
+/** rm with honest retries; a dir still locked by a Windows orphan process
+ * (held as its cwd after the adapter tree died mid-recycle) is runner-temp
+ * hygiene, not an ACP contract failure — the machine is ephemeral, so
+ * EBUSY/ENOTEMPTY after the retry budget is tolerated. Other errors throw. */
+async function rmTolerant(target) {
+  try {
+    await rm(target, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 })
+  } catch (error) {
+    if (error?.code !== 'EBUSY' && error?.code !== 'ENOTEMPTY') throw error
+  }
+}
 const secret = 'sk-SYNTHETIC-SECRET'
 
 const INIT_REQUEST = {
@@ -100,7 +112,7 @@ async function start(t, { fault = '', config = null, cli = fake, permission = 'd
   const init = await request('initialize', INIT_REQUEST.params)
   t.after(async () => {
     killTree(child)
-    await rm(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 })
+    await rmTolerant(cwd)
   })
   return { child, request, notification, updates, permissions, init, cwd }
 }
@@ -155,7 +167,7 @@ test('ACP: session/load replays user and assistant history before returning', as
 
 test('ACP: missing CLI entry fails fast without faking a session', async t => {
   const cwd = await mkdtemp(join(tmpdir(), 'zcode-acp-missing-'))
-  t.after(async () => { await rm(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 }) })
+  t.after(async () => { await rmTolerant(cwd) })
   const child = spawn(process.execPath, [bin], { cwd, env: { ...process.env, ZCODE_CODEG_ENTRY: '', HOME: cwd, USERPROFILE: cwd }, stdio: ['pipe', 'pipe', 'pipe'] })
   let stderr = ''
   child.stderr.on('data', bytes => { stderr += bytes })
@@ -209,7 +221,7 @@ test('ACP: unconfirmed cancellation recycles the backend and the session survive
     }),
     cancelTimeoutMs: 400,
   })
-  t.after(async () => { await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 }) })
+  t.after(async () => { await rmTolerant(dir) })
   const { sessionId } = await agent.newSession({ cwd: dir, mcpServers: [] })
   const pending = agent.prompt({ sessionId, prompt: [{ type: 'text', text: 'long response' }] })
     .then(value => ({ ok: value }), error => error)
