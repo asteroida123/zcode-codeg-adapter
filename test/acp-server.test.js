@@ -96,7 +96,7 @@ async function start(t, { fault = '', config = null, cli = fake, permission = 'd
   const init = await request('initialize', INIT_REQUEST.params)
   t.after(async () => {
     killTree(child)
-    await rm(cwd, { recursive: true, force: true, maxRetries: 3 })
+    await rm(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 })
   })
   return { child, request, notification, updates, permissions, init, cwd }
 }
@@ -151,7 +151,7 @@ test('ACP: session/load replays user and assistant history before returning', as
 
 test('ACP: missing CLI entry fails fast without faking a session', async t => {
   const cwd = await mkdtemp(join(tmpdir(), 'zcode-acp-missing-'))
-  t.after(async () => { await rm(cwd, { recursive: true, force: true, maxRetries: 3 }) })
+  t.after(async () => { await rm(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 }) })
   const child = spawn(process.execPath, [bin], { cwd, env: { ...process.env, ZCODE_CODEG_ENTRY: '', HOME: cwd, USERPROFILE: cwd }, stdio: ['pipe', 'pipe', 'pipe'] })
   let stderr = ''
   child.stderr.on('data', bytes => { stderr += bytes })
@@ -205,7 +205,7 @@ test('ACP: unconfirmed cancellation recycles the backend and the session survive
     }),
     cancelTimeoutMs: 400,
   })
-  t.after(async () => { await rm(dir, { recursive: true, force: true, maxRetries: 3 }) })
+  t.after(async () => { await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 }) })
   const { sessionId } = await agent.newSession({ cwd: dir, mcpServers: [] })
   const pending = agent.prompt({ sessionId, prompt: [{ type: 'text', text: 'long response' }] })
     .then(value => ({ ok: value }), error => error)

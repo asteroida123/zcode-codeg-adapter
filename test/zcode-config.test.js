@@ -84,7 +84,7 @@ test('runtimeModel: third-party inlines the key, builtin never does', () => {
 })
 
 test('config path lives under $HOME/.zcode/v2', () => {
-  assert.equal(zcodeConfigPath('/home/u'), '/home/u/.zcode/v2/config.json')
+  assert.equal(zcodeConfigPath('/home/u'), join('/home/u', '.zcode', 'v2', 'config.json'))
 })
 
 // ---- 经 fake 后端的端到端：目录合并且按 config 切换真实发生 ----------------

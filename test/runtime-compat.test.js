@@ -5,7 +5,7 @@ import { promisify } from 'node:util'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { assertNode, checkLauncher, LauncherError, manifest } from '../src/launcher.js'
 
@@ -48,7 +48,7 @@ test('Runtime: launcher precheck and upstream initialization pass in a real subp
   const configHome = await mkdtemp(join(tmpdir(), 'zcode-runtime-config-'))
   const probe = join(configHome, 'precheck.mjs')
   await writeFile(probe, [
-    "import { checkLauncher } from " + JSON.stringify(launcher) + ";",
+    "import { checkLauncher } from " + JSON.stringify(pathToFileURL(launcher).href) + ";",
     "const upstream = await checkLauncher();",
     "console.log(JSON.stringify({ ok: true, name: upstream.name, version: upstream.version, entry: upstream.entry.length > 0 }));",
   ].join('\n'))
