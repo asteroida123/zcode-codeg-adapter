@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { mkdtemp, readFile, rm, writeFile, access } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -12,6 +12,21 @@ import { ZcodeCodegAgent, permissionDelegator } from '../src/acp/server.mjs'
 const bin = fileURLToPath(new URL('../bin/zcode-codeg-acp.js', import.meta.url))
 const fake = fileURLToPath(new URL('./fake-zcode.cjs', import.meta.url))
 const resumeFake = fileURLToPath(new URL('./fake-resume-model.cjs', import.meta.url))
+
+/** Kill a spawned adapter AND its backend grandchild on every platform.
+ * TerminateProcess (Windows child.kill) runs no cleanup in the adapter, so
+ * the native-backend child survives as an orphan holding inherited pipe
+ * handles — node --test then waits on the chain until the job timeout.
+ * taskkill /T /F takes the tree down; handle destroy force-closes our side. */
+function killTree(child) {
+  try { child.kill('SIGKILL') } catch {}
+  if (process.platform === 'win32' && child.pid) {
+    try { spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' }) } catch {}
+  }
+  for (const stream of [child.stdin, child.stdout, child.stderr]) {
+    try { stream?.destroy() } catch {}
+  }
+}
 const secret = 'sk-SYNTHETIC-SECRET'
 
 const INIT_REQUEST = {
@@ -80,8 +95,7 @@ async function start(t, { fault = '', config = null, cli = fake, permission = 'd
   }
   const init = await request('initialize', INIT_REQUEST.params)
   t.after(async () => {
-    child.stdin.end()
-    child.kill('SIGKILL')
+    killTree(child)
     await rm(cwd, { recursive: true, force: true, maxRetries: 3 })
   })
   return { child, request, notification, updates, permissions, init, cwd }
@@ -124,7 +138,7 @@ test('ACP: session/load replays user and assistant history before returning', as
     sessionId: created.result.sessionId,
     prompt: [{ type: 'text', text: 'Reply with exactly ZCODE_PROBE_beefed. Do not use tools or access files.' }],
   })
-  first.child.kill('SIGKILL')
+  killTree(first.child)
   const second = await start(t)
   const loaded = await second.request('session/load', { cwd: workspace, sessionId: created.result.sessionId, mcpServers: [] })
   assert.equal(loaded.error, undefined, JSON.stringify(loaded).slice(0, 300))
@@ -163,7 +177,7 @@ test('ACP: adapter config supplies the resumed send when the CLI publishes nothi
     prompt: [{ type: 'text', text: 'Reply with exactly ZCODE_PROBE_abcdef. Do not use tools or access files.' }],
   })
   assert.equal(prompted.result?.stopReason, 'end_turn')
-  first.child.kill('SIGKILL')
+  killTree(first.child)
   // Second process with the adapter config: load must supply the descriptor.
   const second = await start(t, { cli: resumeFake, fault: 'unpublished-runtime', config: resumeConfig })
   const loaded = await second.request('session/load', {

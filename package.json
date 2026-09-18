@@ -26,7 +26,7 @@
   },
   "scripts": {
     "check": "node --check bin/zcode-codeg.js && node --check src/launcher.js && node scripts/check-backend.mjs",
-    "test": "node --test test/unit.test.js test/backend-contract.test.js test/probe.test.js test/local-error.test.js test/cli-setup.test.js test/turn-evidence.test.js test/resume-readiness.test.js test/acp-server.test.js test/runtime-compat.test.js test/zcode-config.test.js",
+    "test": "node --test --test-timeout=180000 test/unit.test.js test/backend-contract.test.js test/probe.test.js test/local-error.test.js test/cli-setup.test.js test/turn-evidence.test.js test/resume-readiness.test.js test/acp-server.test.js test/runtime-compat.test.js test/zcode-config.test.js",
     "test:upstream": "node --test test/upstream.test.js",
     "doctor": "node bin/zcode-codeg.js doctor",
     "test:backend": "node --test test/backend-contract.test.js test/probe.test.js test/local-error.test.js test/turn-evidence.test.js test/resume-readiness.test.js",

@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import {
   buildProviderRegistry, buildRuntimeModel, selectableModelCatalog, zcodeConfigPath,
 } from '../src/backend/zcode-config.mjs'
@@ -97,6 +97,21 @@ test('config path lives under $HOME/.zcode/v2', () => {
 const bin = fileURLToPath(new URL('../bin/zcode-codeg-acp.js', import.meta.url))
 const fake = fileURLToPath(new URL('./fake-zcode.cjs', import.meta.url))
 
+/** Kill a spawned adapter AND its backend grandchild on every platform.
+ * TerminateProcess (Windows child.kill) runs no cleanup in the adapter, so
+ * the native-backend child survives as an orphan holding inherited pipe
+ * handles — node --test then waits on the chain until the job timeout.
+ * taskkill /T /F takes the tree down; handle destroy force-closes our side. */
+function killTree(child) {
+  try { child.kill('SIGKILL') } catch {}
+  if (process.platform === 'win32' && child.pid) {
+    try { spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' }) } catch {}
+  }
+  for (const stream of [child.stdin, child.stdout, child.stderr]) {
+    try { stream?.destroy() } catch {}
+  }
+}
+
 async function start(t, { zcodeHomeConfig, noRegistry = false } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'zcode-cfg-test-'))
   const env = { ...process.env, ZCODE_CODEG_ENTRY: fake, HOME: cwd, USERPROFILE: cwd, TMPDIR: undefined,
@@ -106,7 +121,7 @@ async function start(t, { zcodeHomeConfig, noRegistry = false } = {}) {
     await writeFile(join(cwd, '.zcode', 'v2', 'config.json'), JSON.stringify(zcodeHomeConfig))
   }
   const child = spawn(process.execPath, [bin], { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] })
-  t.after(() => { try { child.kill() } catch {} })
+  t.after(() => killTree(child))
   let nextId = 1
   const pending = new Map()
   // An adapter that dies at boot (missing dependency, E_ENTRY, crash) must
