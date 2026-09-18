@@ -19,10 +19,14 @@ const resumeFake = fileURLToPath(new URL('./fake-resume-model.cjs', import.meta.
  * handles — node --test then waits on the chain until the job timeout.
  * taskkill /T /F takes the tree down; handle destroy force-closes our side. */
 function killTree(child) {
-  try { child.kill('SIGKILL') } catch {}
+  // ORDER MATTERS on Windows: taskkill /T /F must run while the adapter is
+  // still alive — it enumerates the process TREE by root PID, and a
+  // pre-killed root leaves the backend grandchild orphaned with the temp
+  // dir as its cwd, which Windows then refuses to rmdir (EBUSY).
   if (process.platform === 'win32' && child.pid) {
     try { spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' }) } catch {}
   }
+  try { child.kill('SIGKILL') } catch {}
   for (const stream of [child.stdin, child.stdout, child.stderr]) {
     try { stream?.destroy() } catch {}
   }
