@@ -114,6 +114,21 @@ async function handle(frame) {
     })) })
     return
   }
+  if (method === 'mcp/list') {
+    const servers = params?.mcpServers
+    if (params?.mode === 'connect') {
+      if (!Array.isArray(servers)) { error(id, -32602); return }
+      const statuses = {}
+      for (const entry of servers) {
+        if (!entry?.name || typeof entry.command !== 'string' || entry.command.length === 0) { error(id, -32602); return }
+        statuses[entry.name] = { status: 'connected', transport: 'stdio', toolCount: 1, updatedAt: new Date().toISOString() }
+      }
+      reply(id, { statuses })
+      return
+    }
+    reply(id, { statuses: {} })
+    return
+  }
   if (method === 'workspace/updateProviderRegistry') {
     // FAKE_NO_REGISTRY=1 mirrors 0.16.5: no such method at all.
     if (process.env.FAKE_NO_REGISTRY === '1') { error(id, -32601); return }

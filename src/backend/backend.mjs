@@ -60,8 +60,26 @@ export class AppServerBackend {
     if (!['plan', 'build'].includes(mode)) throw new ProbeError('E_MODE')
     const canonical = await realpath(cwd)
     const workspace = { workspacePath: canonical, workspaceKey: canonical }
+    // Both create and resume take mcpServers (the resume schema carries it for
+    // cold-restore runtimes; omitting it there silently drops the tool surface).
+    const mcpServersSanitized = this.#sanitizeMcpServers(mcpServers)
+    // MCP servers are REGISTERED by create/resume but only CONNECTED when the
+    // host calls mcp/list with mode "connect" — the desktop's own flow does
+    // this BEFORE sessions start, and the runtime snaps up the connected pool
+    // at session init. Connecting after create races the session's MCP init:
+    // the tool surface then stays empty for the whole session. Best-effort: a
+    // failure never blocks the session.
+    if (mcpServersSanitized.length > 0) {
+      await this.rpc.request('mcp/list', {
+        workspace,
+        mcpServers: mcpServersSanitized,
+        mode: 'connect',
+      }, { timeoutMs: 30000 }).catch(() => {})
+    }
     const result = await this.rpc.request(sessionId ? 'session/resume' : 'session/create',
-      sessionId ? { sessionId, workspace } : { workspace, mode, mcpServers: this.#sanitizeMcpServers(mcpServers) })
+      sessionId
+        ? { sessionId, workspace, mcpServers: mcpServersSanitized }
+        : { workspace, mode, mcpServers: mcpServersSanitized })
     const id = result?.session?.sessionId
     if (!idValue(id) || (sessionId && id !== sessionId) || this.sessions.has(id)) throw new ProbeError('E_SESSION_ID')
     const returnedCwd = result?.session?.workspace?.workspacePath

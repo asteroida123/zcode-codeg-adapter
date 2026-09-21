@@ -1,0 +1,62 @@
+# 协议校准报告（对照 zai-org/zcode 开源源码）
+
+校准基准：`zai-org/zcode` main（Apache-2.0），协议定义
+`packages/shared/src/zcode-protocol/index.ts`，方法实现
+`apps/zcode-cli/packages/core/src/runtime/methods/`，桌面服务层
+`packages/services/`。真机对照：ZCode 桌面 3.12.3（嵌入 app-server
+0.16.5），macOS arm64。日期：2026-09-21。
+
+## 结论速览
+
+适配器的线缆假设**全部与官方协议一致**，两处实质修正已落地：
+resume 路径补传 `mcpServers`（协议 schema 明确接受）、会话建立后触发
+`mcp/list mode:"connect"`（MCP 工具挂载的正确动词）。跨 provider 切换
+的真通道被找到（`provider/updateAccountConfig`），在发布版二进制上
+需要迁移后的 provider 序列化格式，列为后续工作项。
+
+## 逐项校准
+
+| 适配器假设 | 源码结论 | 状态 |
+| --- | --- | --- |
+| 方法名 create/resume/list/read/messages/subscribe/send/stop/close/setModel/setMode/setThoughtLevel | `zcodeProtocolMethods` 逐一对应 | ✅ 证实 |
+| `session/send` params: `{sessionId, content}` | `zcodeSessionSendParamsSchema`: content 必填 + 可选 modelSelection/attachments/expectedRevision 等 | ✅ |
+| `session/setModel` params: `{sessionId, model, persistAsWorkspaceLastUsed}` | 官方 schema `.strict()` 仅此 4 字段（+`expectedRevision`）；**`runtimeModel` 不在协议中**（上游 zcode-acp-server 的发明/前瞻） | ✅ 证实排除 |
+| `model.options.reasoningLevel` 必带（0.16.5 实测） | `modelSelectionSchema = {providerId, modelId, options?: {reasoningLevel?}}`，`.strict()`；缺省时后端报 "Reasoning level is required" | ✅ 官方形状 |
+| Picker 值编码 `providerId/modelId` | 官方 `formatModelPickerValue` 为 `providerId/modelId$level`（`$` 分隔推理档，仅展示边界）；协议态必须保存 ModelSelection | ✅（注意 `$`） |
+| `workspace/updateProviderRegistry` | **协议中不存在**（真机 -32601；源码全库无此方法）。上游 0.32.0 面向的是未发布世代 | ❌ 幻影，已从实现中降级 |
+| 真 provider 通道 | `provider/updateAccountConfig`（"进程级 Account Provider Config"，{revision, basedOnZCodeBuiltinRevision, providers, states}，真机 -32602 证实存在）+ `interaction/requestProviderRuntimeHeaders` 回调 | 🆕 已定位，未实现（provider 条目为迁移后格式，桌面端有整模块转换器） |
+| `session/resume` 接受 mcpServers | `zcodeSessionResumeParamsSchema` 明确含 mcpServers/toolAllowlist/toolDenylist（冷恢复语义） | ✅ 已修：resume 补传 |
+| MCP stdio 线缆形状 `{name, command(string), args[], env:[{name,value}]}` | `zcodeProtocolMcpServerSchema` stdio 分支同构；`isolation`/`protocolVersion`/`timeoutMs` 可选 | ✅ |
+| MCP "注册 ≠ 连接" | create/resume 只注册；`mcp/list mode:"connect"` 才 spawn 并挂载工具（桌面端在会话前调用）。真机实证：connect 后 `codeg-mcp` connected、toolCount=4、模型工具面出现 `mcp__codeg-mcp__delegate_to_agent`（直驱探针） | ✅ 已修：open 时触发 connect |
+| 0.16.5 发布版上模型看不到 MCP 工具 | 发布版 create 未把 params.mcpServers 装配进会话运行时（HEAD 源码的装配链是新增代码）；任何客户端时序都无法在 0.16.5 上挂载 | ⚠️ 上游硬限制，connect 调用为新版前向兼容 |
+| `turn.completed` resultType | 官方枚举：`success/cancelled/error_max_turns/error_max_budget/error_during_execution/error_max_tool_calls`（注释明确 cancelled 复用 completed 上报） | ✅（适配器多认的 canceled/aborted/interrupted 为无害防御拼写） |
+| `session/event` 信封 | discriminatedUnion：turn.started/completed/failed、part.delta（field: text/reasoning/input/output）、tool.updated、permission.requested/resolved、userInput.requested/resolved、checkpoint.created 等 | ✅ |
+| tool.updated 生命周期 | `scheduled → started → progress → result|error`，另有 batch/raw 聚合；scheduled 携带 toolName/input | ✅ |
+| 权限选项 kind 为自由字符串 | `zcodePermissionOptionSchema.kind: nonEmptyString`——闭枚举是 ACP 侧约束；真机原生发出 `deny` 等非标 kind | ✅ 适配器映射层位置正确 |
+| 模式枚举 | legacy: `plan/build/edit/yolo/auto`；v4 值域刻意排除 auto（源码注释）。适配器当前仅暴露 plan/build | 📝 可扩展 edit/yolo |
+| 状态枚举 | `idle/running/waiting/paused/...`——`waiting`（等用户）存在，适配器尚未区分 | 📝 待跟进 |
+| 反向偏好应答 `askUserQuestionAutoResolutionEnabled:false` | 与 desktop 行为一致；配合 `interaction/requestOfficialMcpAuthHeaders` 等反向面 | ✅ |
+| `session/send` 已收敛 v4 sendText、`session/stop`/`fork`/`cancelBackgroundTask` 标记 @deprecated（wire 兼容保留） | 0.16.5 发布版仍走 legacy wire——适配器用法正确，升级时需关注 v4 命令面 | 📝 跟进项 |
+
+## 实验记录（真机 0.16.5）
+
+- `workspace/updateProviderRegistry` → -32601 Method not found
+- `session/setModel` + runtimeModel → Zod `unrecognized_keys: runtimeModel`
+- `session/setModel` 裸 model ref → ModelProtocolError "Reasoning level is required"
+- `session/setModel` + `options.reasoningLevel`（registry 内模型）→ OK，read 回读一致
+- `provider/updateAccountConfig`（config.json 原样）→ Zod 拒绝（字段形状不符，需迁移后格式）
+- `provider/updateAccountConfig`（正确信封）→ 待实现：需 `@zcode/provider` 的 provider 序列化
+- `mcp/list` connect → 真实 spawn codeg-mcp：connected、toolCount=4、
+  `protocolEra: "legacy"`；模型工具面确认出现 `mcp__codeg-mcp__delegate_to_agent`（直驱探针）
+
+## 后续工作项
+
+1. **跨 provider 切换解锁**：实现 `provider/updateAccountConfig` 推送
+   （需按 `packages/services/src/model-provider/legacyZCodeConfigProviderReader.ts`
+   的转换逻辑把 config.json 迁移到协议 provider 格式）。
+2. **MCP 工具面**：新版后端发布后，现有 connect 调用自动生效；届时用
+   `mcp/list` 的 toolCount 断言加回归。
+3. **模式面扩展**：向 codeg 暴露 `edit`（半自动）/`yolo`（全自动，等价
+   其他智能体的 bypass 权限模式）；`auto` 遵循 v4 弃用不暴露。
+4. **`waiting` 状态**：会话等用户时 projection.status=waiting，适配器可
+   向 ACP 侧表达 blocked-on-user（当前仅委托链路有 blocked_on）。
