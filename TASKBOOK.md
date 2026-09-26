@@ -153,9 +153,9 @@ node scripts/probe-zcode.mjs --live --zcode "/Applications/ZCode.app/Contents/Re
 背景：ZCode 桌面 0.16.5 + 本 adapter 0.1.4。ZCode 会话工具表已挂上完整
 codeg-mcp 工具集，ZCode→codex 委托端到端可通；实测暴露三个"ZCode 作为父
 智能体委托他人"链路上的真实阻断点。分支 `feat/parent-delegation-hardening`，
-每缺陷一个提交。以下修复均为 adapter 侧行为 + 合成回归钉住；真实后端复测
-（185s 权限风暴场景、E_FRAME 后 recycle 实效、真机 preferred mode）待下一轮
-本机授权后执行，未跑过不宣称通过。
+每缺陷一个提交。真机复测已于 2026-09-26 完成（见下方"真机复测结果"）：
+场景 1/2 通过；场景 3 首轮暴露 E_FRAME 真机形态缺口，修复（`c6439a6`）后
+复测通过。
 
 1. **权限请求风暴**（`src/backend/backend.mjs`）
    - 实测现象：一条 MCP 工具调用触发的 `interaction/requestPermission` 未应答
@@ -182,7 +182,12 @@ codeg-mcp 工具集，ZCode→codex 委托端到端可通；实测暴露三个"Z
      失败或恢复后再次 E_FRAME 则标记永久 fatal——此后每次 prompt 立即返回
      同一条可操作错误（"close this session and create a new one"），不再触
      后端。失败 prompt 不自动重放（是否重发由客户端决定）；恢复后有一次
-     成功 prompt 即重置计数（新的砖化事件有自己的恢复机会）。
+     成功 prompt 即重置计数（新的砖化事件有自己的恢复机会）。真机复测
+     （2026-09-26）补充：真机上该故障还以**传输层断帧**形态出现（无错误
+     响应、stdout 帧损坏、本地 E_FRAME 传输错误），`c6439a6` 将本地
+     E_FRAME 传输码同判 session-fatal，并在 `abortTurns` 的 fault 同步结算
+     路径先行分类（onFault 先于 send 拒绝微任务结算 turn，只在 send 处
+     分类来不及）。
    - 边界（如实记录）：resume+read 只证明传输与读回正常，**不证明 send 可
      用**，故恢复后首条 prompt 若再 E_FRAME 才升级永久 fatal；后端没有任何
      "重建会话/健康探测"动词，adapter 侧更深的恢复需要 ZCode 后端支持。
@@ -211,19 +216,59 @@ codeg-mcp 工具集，ZCode→codex 委托端到端可通；实测暴露三个"Z
      的 plan/build；edit/yolo 的广告面仍按 PROTOCOL-CALIBRATION 后续项处理。
 
 测试证据（合成，本机 macOS arm64，本轮复跑 Node 22.23.1）：`npm run check` 通
-过；`npm test` 235 项全过（新增 19：backend-contract 5（含跨窗口重问）、
-acp-server 6 中新增 3 项 preferred + 2 项 frame + 1 项风暴、preferred-config
-8；另 harness initParams 参数化）；`npm run test:mutations` 10/10 检出（新增
-3：权限去重、native-frame 分类、嗅探捕获）；`npm run probe:backend`
-synthetic/pass。未运行真实 ZCode 复测。
+过；`npm test` 238 项全过（原 235 + `c6439a6` 新增 3：传输断帧 contract 1、
+acp 恢复/永久 2；此前 235 含 backend-contract 5（含跨窗口重问）、acp-server
+新增 3 项 preferred + 2 项 frame + 1 项风暴、preferred-config 8）；`npm run
+test:mutations` 11/11 检出（新增：transport frame classification；此前含权限
+去重、native-frame 分类、嗅探捕获）；`npm run probe:backend` synthetic/pass。
+
+真机复测结果（2026-09-26，macOS arm64 / Node 22.23.1 / ZCode 桌面 0.16.5，
+本分支含 `c6439a6`；驱动 `spikes/live-retest/driver.mjs`，脱敏逐帧证据与
+verdict 在 `/tmp/zcode-live-retest/<scenario>/`，修复前的失败证据存档于
+`/tmp/zcode-live-retest/storm-prefix-buggy/`）：
+
+1. **preferred mode 真机生效 —— PASS**。initialize 顶层
+   `preferredConfigValues:{"mode":"build"}`（SDK schema 会剥离、靠 stdin 嗅探
+   捕获）→ newSession 返回前收到 `current_mode_update=build`，configOption
+   mode currentValue=build；极小 bash 任务 1 个 tool_call
+   （pending→in_progress→completed）、stopReason=end_turn、标记回流，无 plan
+   模式拒绝。反向对照 `preferredConfigValues:{"mode":"plan"}`：setMode(plan)
+   被原生接受并发出 `current_mode_update=plan`——证明模式确实由嗅探到的
+   preferred 值驱动，而非原生默认恰好相同。环境事实（如实记录）：0.16.5 的
+   `session/create` 不决定初始 mode——全新 workspace、create(mode:plan) 仍
+   返回原生默认（本机为 build），且 create 后 ~200ms 内原生会重申自身默认；
+   与原生默认相反的钉扎可能被盖回（adapter 侧 currentValue 如实上报实际
+   运行值，不伪造）。修复中的显式 setMode 是承重步骤。
+2. **权限风暴去重 —— PASS**。build 会话 Write 工具触发 1 条
+   `session/request_permission` 后**故意不应答**，两轮分别挂起 280.6s /
+   278.6s（覆盖 185s 阈值）：客户端累计仅 1 条权限请求（修复前字段报告
+   12-21 条），原生重发全程被去重吸收；风暴按预期以 E_FRAME 收尾（prompt
+   发出后 ~301s，即权限挂起 ~278s）。
+3. **E_FRAME 恢复 —— 首轮 FAIL → 修复 → 复测 PASS**。首轮（修复 5840624
+   后、`c6439a6` 前）：真机 E_FRAME 以**传输层断帧**形态出现——无错误响应、
+   stdout 帧损坏、adapter 本地 E_FRAME 传输错误——`isNativeFrameRejection`
+   只认响应形态（E_REMOTE + native-frame hint），未分类未恢复，客户端收到
+   原样转发的 `{"code":-32603,"message":"Internal error","data":{"details":
+   "E_FRAME"}}`。修复 `c6439a6` 后复测：prompt1 于 301.9s 收到归一化的
+   `E_SESSION_FATAL`（"backend process was recycled and the native session
+   resumed - retry this prompt once"）；客户端重试同一 prompt → 新 Write 权限
+   请求（本轮应答 allow_once）→ 工具 completed、`storm.txt` 落盘
+   （content=storm-marker-42）、end_turn；第三条探测 prompt 亦 end_turn
+   （4990ms）。恢复分支 **transient-recovered**：本机 0.16.5 的 E_FRAME 损伤
+   为进程级，recycle（新进程 + resume 同一原生会话 + read 校验）即痊愈，
+   会话恢复后持续可用。
 
 残留（需 ZCode 后端或后续配合）：
 - 权限未应答为何演化为会话级 E_FRAME——根因在后端的重发/超时策略，adapter
-  只能止血（去重）+ 砖化后清晰失败；
+  只能止血（去重）+ 砖化后恰好一次恢复（真机 2026-09-26 复测：损伤为进程级，
+  recycle+resume 痊愈）或清晰失败；
 - 会话级致命错误无后端恢复动词（无 rebuild/health-probe），恢复上限即本修
   复的 recycle+resume+read；
 - 0.16.5 发布版 create 不装配 `params.mcpServers`（见 PROTOCOL-CALIBRATION），
-  MCP 工具面完整依赖新版后端，与本轮三项修复正交。
+  MCP 工具面完整依赖新版后端，与本轮三项修复正交；
+- 0.16.5 的 `session/create` 不决定初始 mode（真机复测实测），新会话模式取
+  原生全局默认；adapter 侧已用显式 setMode 钉扎，但与原生默认相反的钉扎
+  可能在 create 后 ~200ms 内被原生重申覆盖（见真机复测结果 1）。
 
 
 
