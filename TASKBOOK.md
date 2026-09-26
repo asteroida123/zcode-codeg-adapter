@@ -148,7 +148,129 @@ node scripts/probe-zcode.mjs --live --zcode "/Applications/ZCode.app/Contents/Re
 
 交付需要代码、回归、真实证据、Codeg 改动、安装文档五者同时可查，不以测试数量或 CI 绿色单独验收。
 
-## 6. 本地命令与执行约束
+### T7 / P0：ZCode 父委托链路三缺陷加固（2026-09-26 集成线实测）
+
+背景：ZCode 桌面 0.16.5 + 本 adapter 0.1.4。ZCode 会话工具表已挂上完整
+codeg-mcp 工具集，ZCode→codex 委托端到端可通；实测暴露三个"ZCode 作为父
+智能体委托他人"链路上的真实阻断点。分支 `feat/parent-delegation-hardening`，
+每缺陷一个提交。真机复测已于 2026-09-26 完成（见下方"真机复测结果"）：
+场景 1/2 通过；场景 3 首轮暴露 E_FRAME 真机形态缺口，修复（`c6439a6`）后
+复测通过。
+
+1. **权限请求风暴**（`src/backend/backend.mjs`）
+   - 实测现象：一条 MCP 工具调用触发的 `interaction/requestPermission` 未应答
+     期间，原生后端每 2-10 秒用**新 request id** 重发同一 tool_call 的权限请求；
+     adapter 1:1 透传成 `session/request_permission`，客户端排队 12-21 条；约
+     185 秒后后端以 `Internal error: E_FRAME` 拒绝。
+   - 修复：`reverseRequest` 按 `(sessionId, toolCallId)` 去重——同一在途
+     tool_call 只向 ACP 客户端转发一次，重复 reverse 请求 **join** 同一决策
+     （每个 reverse id 仍各自得到响应，不悬挂）；决策落定后 30 秒退避窗口内
+     的重问**重放**已记录决策（重放的 allow 只可能是客户端对该 tool_call 已
+     给出的选择，重放的 deny 仍计入当轮 denied）。上限：join 32、条目 64；
+     新增 `metrics.permissionsDeduped` 计数。
+   - 回归：fake 新增 `permission-retry`（6 连发同 tool_call、各自待响应），
+     断言客户端只见 1 条且 6 个 reverse id 全部被应答；另钉住窗口内重问不
+     重新弹窗、跨窗口会重新询问。mutation：join 返回值置 null 必须红。
+2. **E_FRAME 会话砖化**（`src/backend/diagnostics.mjs`、`src/backend/backend.mjs`、`src/acp/server.mjs`）
+   - 实测现象：后端一旦返回 `Internal error: E_FRAME`，该 session 后续所有
+     prompt 约 5ms 内被同样拒绝；adapter 原行为是每次 prompt 原样转发底层错误。
+   - 修复：diagnostics 新增闭枚举 hint `native-frame`（`\bE_FRAME\b` 符号/文本
+     识别，不复制远端文本）；`session/send` 拒绝命中该 hint 时归一为
+     `E_SESSION_FATAL`（携带 rpcCode 与 hints）并照旧关闭传输。ACP 层做
+     **恰好一次**恢复尝试：复用 cancel 路径的 recycle（新后端进程 + resume
+     同一原生会话 + read 校验），成功则错误信息明确指引"重试一次"；resume
+     失败或恢复后再次 E_FRAME 则标记永久 fatal——此后每次 prompt 立即返回
+     同一条可操作错误（"close this session and create a new one"），不再触
+     后端。失败 prompt 不自动重放（是否重发由客户端决定）；恢复后有一次
+     成功 prompt 即重置计数（新的砖化事件有自己的恢复机会）。真机复测
+     （2026-09-26）补充：真机上该故障还以**传输层断帧**形态出现（无错误
+     响应、stdout 帧损坏、本地 E_FRAME 传输错误），`c6439a6` 将本地
+     E_FRAME 传输码同判 session-fatal，并在 `abortTurns` 的 fault 同步结算
+     路径先行分类（onFault 先于 send 拒绝微任务结算 turn，只在 send 处
+     分类来不及）。
+   - 边界（如实记录）：resume+read 只证明传输与读回正常，**不证明 send 可
+     用**，故恢复后首条 prompt 若再 E_FRAME 才升级永久 fatal；后端没有任何
+     "重建会话/健康探测"动词，adapter 侧更深的恢复需要 ZCode 后端支持。
+   - 回归：fake 新增 `frame-transient`（进程内损坏，resume 痊愈）与
+     `frame-brick`（持久砖化）；分别钉住"恢复后重试成功"与"三次 prompt 的
+     错误语义：第一条含恢复结果、第二/三条为同一稳定错误"。mutation：
+     native-frame 分类改判 request-schema 必须红。
+3. **connect 时 preferredConfigValues 的 mode 不生效**（新增 `src/acp/preferred-config.mjs`、`src/acp/server.mjs`）
+   - 根因：Zed/codeg 风格客户端在 initialize **顶层**发
+     `preferredConfigValues:{"mode":"build"}`，而锁定 SDK 1.4.0 的 initialize
+     zod schema 剥离未知顶层字段，值到不了 `initialize()` handler；
+     `newSession` 又硬编码 `mode:'plan'`——plan 模式调不了 MCP 工具，委托链
+     被卡在计划流程。
+   - 修复：stdin 上加**被动** TransformStream 嗅探（字节原样转发、仅旁路解
+     析 initialize 帧提取该字段；256KB 扫描预算、sanitize 只收基本类型、
+     16 键/256 字符上限）；同时接受 `_meta.preferredConfigValues`（schema 保
+     留 `_meta`，顶层线上值优先）。`newSession` 以 preferred mode 调 create，
+     并立即补发一次已验证动词 `session/setMode`（等价于建立时即做一次
+     acp_set_config_option(mode)）+ `current_mode_update` 通知。off-menu 值
+     （如 yolo）忽略不猜；`session/load` 不应用（保留会话持久化 mode）；
+     原生拒绝 setMode 时诚实降级，configOption currentValue 如实显示。
+   - 回归：新增 `test/preferred-config.test.js`（字节级转发不变形、分块边
+     界、噪声/伪造帧、预算放弃、sanitize 边界，8 项）+ acp-server 3 项（顶
+     层生效含 current_mode_update、_meta 生效、off-menu 保持 plan）。注：
+     plan/build/edit/yolo 是 ZCode 模式枚举，本修复只应用已向客户端广告
+     的 plan/build；edit/yolo 的广告面仍按 PROTOCOL-CALIBRATION 后续项处理。
+
+测试证据（合成，本机 macOS arm64，本轮复跑 Node 22.23.1）：`npm run check` 通
+过；`npm test` 238 项全过（原 235 + `c6439a6` 新增 3：传输断帧 contract 1、
+acp 恢复/永久 2；此前 235 含 backend-contract 5（含跨窗口重问）、acp-server
+新增 3 项 preferred + 2 项 frame + 1 项风暴、preferred-config 8）；`npm run
+test:mutations` 11/11 检出（新增：transport frame classification；此前含权限
+去重、native-frame 分类、嗅探捕获）；`npm run probe:backend` synthetic/pass。
+
+真机复测结果（2026-09-26，macOS arm64 / Node 22.23.1 / ZCode 桌面 0.16.5，
+本分支含 `c6439a6`；驱动 `spikes/live-retest/driver.mjs`，脱敏逐帧证据与
+verdict 在 `/tmp/zcode-live-retest/<scenario>/`，修复前的失败证据存档于
+`/tmp/zcode-live-retest/storm-prefix-buggy/`）：
+
+1. **preferred mode 真机生效 —— PASS**。initialize 顶层
+   `preferredConfigValues:{"mode":"build"}`（SDK schema 会剥离、靠 stdin 嗅探
+   捕获）→ newSession 返回前收到 `current_mode_update=build`，configOption
+   mode currentValue=build；极小 bash 任务 1 个 tool_call
+   （pending→in_progress→completed）、stopReason=end_turn、标记回流，无 plan
+   模式拒绝。反向对照 `preferredConfigValues:{"mode":"plan"}`：setMode(plan)
+   被原生接受并发出 `current_mode_update=plan`——证明模式确实由嗅探到的
+   preferred 值驱动，而非原生默认恰好相同。环境事实（如实记录）：0.16.5 的
+   `session/create` 不决定初始 mode——全新 workspace、create(mode:plan) 仍
+   返回原生默认（本机为 build），且 create 后 ~200ms 内原生会重申自身默认；
+   与原生默认相反的钉扎可能被盖回（adapter 侧 currentValue 如实上报实际
+   运行值，不伪造）。修复中的显式 setMode 是承重步骤。
+2. **权限风暴去重 —— PASS**。build 会话 Write 工具触发 1 条
+   `session/request_permission` 后**故意不应答**，两轮分别挂起 280.6s /
+   278.6s（覆盖 185s 阈值）：客户端累计仅 1 条权限请求（修复前字段报告
+   12-21 条），原生重发全程被去重吸收；风暴按预期以 E_FRAME 收尾（prompt
+   发出后 ~301s，即权限挂起 ~278s）。
+3. **E_FRAME 恢复 —— 首轮 FAIL → 修复 → 复测 PASS**。首轮（修复 5840624
+   后、`c6439a6` 前）：真机 E_FRAME 以**传输层断帧**形态出现——无错误响应、
+   stdout 帧损坏、adapter 本地 E_FRAME 传输错误——`isNativeFrameRejection`
+   只认响应形态（E_REMOTE + native-frame hint），未分类未恢复，客户端收到
+   原样转发的 `{"code":-32603,"message":"Internal error","data":{"details":
+   "E_FRAME"}}`。修复 `c6439a6` 后复测：prompt1 于 301.9s 收到归一化的
+   `E_SESSION_FATAL`（"backend process was recycled and the native session
+   resumed - retry this prompt once"）；客户端重试同一 prompt → 新 Write 权限
+   请求（本轮应答 allow_once）→ 工具 completed、`storm.txt` 落盘
+   （content=storm-marker-42）、end_turn；第三条探测 prompt 亦 end_turn
+   （4990ms）。恢复分支 **transient-recovered**：本机 0.16.5 的 E_FRAME 损伤
+   为进程级，recycle（新进程 + resume 同一原生会话 + read 校验）即痊愈，
+   会话恢复后持续可用。
+
+残留（需 ZCode 后端或后续配合）：
+- 权限未应答为何演化为会话级 E_FRAME——根因在后端的重发/超时策略，adapter
+  只能止血（去重）+ 砖化后恰好一次恢复（真机 2026-09-26 复测：损伤为进程级，
+  recycle+resume 痊愈）或清晰失败；
+- 会话级致命错误无后端恢复动词（无 rebuild/health-probe），恢复上限即本修
+  复的 recycle+resume+read；
+- 0.16.5 发布版 create 不装配 `params.mcpServers`（见 PROTOCOL-CALIBRATION），
+  MCP 工具面完整依赖新版后端，与本轮三项修复正交；
+- 0.16.5 的 `session/create` 不决定初始 mode（真机复测实测），新会话模式取
+  原生全局默认；adapter 侧已用显式 setMode 钉扎，但与原生默认相反的钉扎
+  可能在 create 后 ~200ms 内被原生重申覆盖（见真机复测结果 1）。
+
+
 
 以下基线检查不需要 npm 安装或真实账号：
 

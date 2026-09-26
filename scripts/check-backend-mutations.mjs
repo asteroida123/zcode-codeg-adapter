@@ -30,6 +30,19 @@ const cases = [
   { name: 'reverse-request namespace', file: 'src/backend/rpc.mjs', pattern: 'RPC: reverse request ID',
     before: '    if (hasMethod) {',
     after: '    if (hasMethod && hasId && this.pending.has(frame.id)) { this.pending.get(frame.id)(null, frame.params); return }\n    if (hasMethod) {' },
+  { name: 'permission re-send dedupe', file: 'src/backend/backend.mjs', pattern: 'Backend: re-sent permission requests',
+    before: '        this.metrics.permissionsDeduped++\n        return entry.response',
+    after: '        this.metrics.permissionsDeduped++\n        return null' },
+  { name: 'native frame classification', file: 'src/backend/backend.mjs', pattern: 'Backend: a native frame send rejection',
+    before: "error.details.remoteHints.includes('native-frame')",
+    after: "error.details.remoteHints.includes('request-schema')" },
+  { name: 'transport frame classification', file: 'src/backend/backend.mjs', pattern: 'Backend: a transport framing break',
+    before: 'state.active.finish(new ProbeError(\'E_SESSION_FATAL\', error.rpcCode, error.details))',
+    after: 'state.active.finish(error)' },
+  { name: 'preferred-config capture', file: 'src/acp/preferred-config.mjs', testFile: 'test/preferred-config.test.js',
+    pattern: 'preferred-config: the initialize wire field is captured',
+    before: 'if (preferences) store.preferredConfigValues = preferences',
+    after: 'void preferences' },
 ]
 for (const mutation of cases) {
   const dir = await mkdtemp(join(tmpdir(), 'zcode-mutation-'))

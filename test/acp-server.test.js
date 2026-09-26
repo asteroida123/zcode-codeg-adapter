@@ -53,7 +53,7 @@ const INIT_REQUEST = {
 /** One adapter process per test. Frames are plain NDJSON JSON-RPC; the ACP
  * session id equals the native session id, which the synthetic CLI accepts.
  */
-async function start(t, { fault = '', config = null, cli = fake, permission = 'deny' } = {}) {
+async function start(t, { fault = '', config = null, cli = fake, permission = 'deny', initParams = INIT_REQUEST.params } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'zcode-acp-test-'))
   const env = {
     ...process.env, ZCODE_CODEG_ENTRY: cli, FAKE_ZCODE_FAULT: fault, TMPDIR: undefined,
@@ -109,7 +109,7 @@ async function start(t, { fault = '', config = null, cli = fake, permission = 'd
   const notification = (method, params) => {
     child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n')
   }
-  const init = await request('initialize', INIT_REQUEST.params)
+  const init = await request('initialize', initParams)
   t.after(async () => {
     killTree(child)
     await rmTolerant(cwd)
@@ -272,6 +272,96 @@ test('ACP: allow decision writes the file and completes the tool', async t => {
   assert.equal(written, 'unexpected write')
 })
 
+test('ACP: a native permission re-send storm surfaces as one client question', async t => {
+  // Field regression (2026-09-26 integration line): six native re-requests of
+  // one unanswered tool call used to queue six identical approval prompts on
+  // the client before the session died with a native frame error.
+  const { request, permissions, cwd } = await start(t, { fault: 'permission-retry', permission: 'deny' })
+  const created = await request('session/new', { cwd, mcpServers: [] })
+  const prompted = await request('session/prompt', {
+    sessionId: created.result.sessionId, prompt: [{ type: 'text', text: 'Write deny-sentinel.txt once' }],
+  })
+  assert.equal(prompted.result?.stopReason, 'end_turn')
+  assert.equal(permissions.length, 1, 'six native re-sends must surface as one client question')
+  await assert.rejects(access(join(cwd, 'deny-sentinel.txt')), { code: 'ENOENT' })
+})
+
+test('ACP: a transient native frame error recycles the session and the retry completes', async t => {
+  // Process-local frame damage: the first send is rejected with the native
+  // frame error; a recycled backend that resumes the same session works.
+  const { request, cwd } = await start(t, { fault: 'frame-transient' })
+  const created = await request('session/new', { cwd, mcpServers: [] })
+  const sessionId = created.result.sessionId
+  const prompt = () => request('session/prompt', {
+    sessionId, prompt: [{ type: 'text', text: 'Reply with exactly ZCODE_PROBE_abcdef. Do not use tools or access files.' }],
+  })
+  const first = await prompt()
+  assert.match(JSON.stringify(first.error ?? {}), /E_SESSION_FATAL/)
+  assert.match(JSON.stringify(first.error ?? {}), /recycled and the native session resumed/)
+  const retried = await prompt()
+  assert.equal(retried.error, undefined, JSON.stringify(retried).slice(0, 300))
+  assert.equal(retried.result?.stopReason, 'end_turn')
+})
+
+test('ACP: a transport framing break during send is session-fatal and the retry completes', async t => {
+  // Live-retest regression (2026-09-26, real 0.16.5): the session-bricking
+  // frame fault arrived as a broken stdout frame - no error response, the
+  // local E_FRAME transport fault - and the classification missed it, so the
+  // client saw a raw "Internal error" with data.details "E_FRAME" and no
+  // recovery. Same recovery contract as the response-shaped fault.
+  const { request, cwd } = await start(t, { fault: 'frame-wire' })
+  const created = await request('session/new', { cwd, mcpServers: [] })
+  const sessionId = created.result.sessionId
+  const prompt = () => request('session/prompt', {
+    sessionId, prompt: [{ type: 'text', text: 'Reply with exactly ZCODE_PROBE_wirebrk. Do not use tools or access files.' }],
+  })
+  const first = await prompt()
+  assert.match(JSON.stringify(first.error ?? {}), /E_SESSION_FATAL/)
+  assert.match(JSON.stringify(first.error ?? {}), /recycled and the native session resumed/)
+  const retried = await prompt()
+  assert.equal(retried.error, undefined, JSON.stringify(retried).slice(0, 300))
+  assert.equal(retried.result?.stopReason, 'end_turn')
+})
+
+test('ACP: a persistent transport framing break fails fast with stable recovery guidance', async t => {
+  // Store-level wire damage: every fresh process breaks framing on send for
+  // this session (resume and reads stay healthy). One recovery attempt, then
+  // the same actionable error for every later prompt.
+  const { request, cwd } = await start(t, { fault: 'frame-wire-brick' })
+  const created = await request('session/new', { cwd, mcpServers: [] })
+  const sessionId = created.result.sessionId
+  const prompt = () => request('session/prompt', {
+    sessionId, prompt: [{ type: 'text', text: 'Reply with exactly ZCODE_PROBE_wirebrk. Do not use tools or access files.' }],
+  })
+  const first = await prompt()
+  assert.match(JSON.stringify(first.error ?? {}), /E_SESSION_FATAL/)
+  const second = await prompt()
+  const third = await prompt()
+  assert.match(JSON.stringify(second.error ?? {}), /close this session and create a new one/)
+  assert.equal(JSON.stringify(third.error), JSON.stringify(second.error),
+    'prompts after the permanent verdict fail fast with one stable error')
+})
+
+test('ACP: a persistent native frame error fails fast with stable recovery guidance', async t => {
+  // Store-level frame damage: even a recycled backend that resumes the
+  // session keeps rejecting sends. One recovery attempt, then every later
+  // prompt must fail fast with the SAME actionable error instead of relaying
+  // the raw backend rejection each time.
+  const { request, cwd } = await start(t, { fault: 'frame-brick' })
+  const created = await request('session/new', { cwd, mcpServers: [] })
+  const sessionId = created.result.sessionId
+  const prompt = () => request('session/prompt', {
+    sessionId, prompt: [{ type: 'text', text: 'Reply with exactly ZCODE_PROBE_abcdef. Do not use tools or access files.' }],
+  })
+  const first = await prompt()
+  assert.match(JSON.stringify(first.error ?? {}), /E_SESSION_FATAL/)
+  const second = await prompt()
+  const third = await prompt()
+  assert.match(JSON.stringify(second.error ?? {}), /close this session and create a new one/)
+  assert.equal(JSON.stringify(third.error), JSON.stringify(second.error),
+    'prompts after the permanent verdict fail fast with one stable error')
+})
+
 test('ACP: native permission kinds outside the ACP enum are mapped, not passed through', async t => {
   const { request, cwd } = await start(t)
   const created = await request('session/new', { cwd, mcpServers: [] })
@@ -327,6 +417,39 @@ test('ACP: the mode and model selectors are advertised and applied natively', as
     sessionId: created.result.sessionId, configId: 'mode', value: 'yolo',
   })
   assert.ok(modeRejected.error, 'an off-menu mode value must be rejected')
+})
+
+test('ACP: connect-time preferred mode is applied when the session is created', async t => {
+  // Field regression (2026-09-26): preferredConfigValues arrives top-level on
+  // initialize (Zed/codeg style); the pinned SDK's schema strips it, so
+  // freshly created sessions stayed on plan and could not call MCP tools.
+  const { request, updates, cwd } = await start(t, {
+    initParams: { protocolVersion: 1, clientCapabilities: {}, preferredConfigValues: { mode: 'build' } },
+  })
+  const created = await request('session/new', { cwd, mcpServers: [] })
+  assert.equal(created.error, undefined, JSON.stringify(created).slice(0, 300))
+  const modeOption = created.result.configOptions?.find(option => option.id === 'mode')
+  assert.equal(modeOption?.currentValue, 'build', 'the preferred mode must be applied at establishment')
+  const modeUpdate = updates.find(update => update.update?.sessionUpdate === 'current_mode_update')
+  assert.equal(modeUpdate?.update?.currentModeId, 'build')
+})
+
+test('ACP: preferred config delivered through initialize _meta also applies', async t => {
+  const { request, cwd } = await start(t, {
+    initParams: { protocolVersion: 1, clientCapabilities: {}, _meta: { preferredConfigValues: { mode: 'build' } } },
+  })
+  const created = await request('session/new', { cwd, mcpServers: [] })
+  const modeOption = created.result.configOptions?.find(option => option.id === 'mode')
+  assert.equal(modeOption?.currentValue, 'build')
+})
+
+test('ACP: off-menu or absent preferred values keep the honest default', async t => {
+  const { request, cwd } = await start(t, {
+    initParams: { protocolVersion: 1, clientCapabilities: {}, preferredConfigValues: { mode: 'yolo' } },
+  })
+  const created = await request('session/new', { cwd, mcpServers: [] })
+  const modeOption = created.result.configOptions?.find(option => option.id === 'mode')
+  assert.equal(modeOption?.currentValue, 'plan', 'an off-menu preference is ignored, not guessed onto the wire')
 })
 
 test('ACP: session list mirrors the native store', async t => {

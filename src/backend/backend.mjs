@@ -12,6 +12,41 @@ export const PROFILE = 'app-server-cli-0.16.5-candidate'
 export const EXPECTED_CLI = '0.16.5'
 const idValue = value => typeof value === 'string' && value.length > 0 && value.length <= 512
 
+/** Deduplication key for a native permission request. Only a request that
+ * names both a session and a tool call can be recognized as a re-send; the
+ * fallback id the ACP layer fabricates for id-less requests is per-request
+ * and therefore not deduplicable. */
+function permissionKey(params) {
+  if (!object(params) || !idValue(params.sessionId) || !idValue(params.toolCallId)) return null
+  return `${params.sessionId}\u0000${params.toolCallId}`
+}
+
+/** Bounds for permission re-send suppression. Joins are duplicate reverse
+ * requests waiting on the SAME in-flight decision; the memo window replays
+ * the client's recorded decision for a settled tool call instead of asking
+ * again (the backoff). Both exist because the observed native backend
+ * re-issues interaction/requestPermission for one unanswered tool call with
+ * a fresh request id every few seconds. */
+const PERMISSION_JOIN_LIMIT = 32
+const PERMISSION_MEMO_MS = 30000
+const PERMISSION_ENTRY_LIMIT = 64
+
+/** A native frame rejection is session-level, not request-level: the field
+ * report (2026-09-26) shows the backend answering "Internal error: E_FRAME"
+ * and then rejecting every later prompt on that session identically within
+ * ~5ms. The live retest on the real 0.16.5 backend (same day) exposed a
+ * second, transport-level manifestation of the same fault: no error response
+ * arrives at all - the backend breaks stdout framing (unparsable bytes or
+ * EOF with a partial line) while the send is still pending, surfacing as the
+ * LOCAL E_FRAME transport fault. Both shapes brick the session identically;
+ * neither is a per-request failure. Recognized by the bounded native-frame
+ * hint or the local transport code - never by copying remote message text. */
+function isNativeFrameRejection(error) {
+  return error instanceof ProbeError && (error.code === 'E_FRAME' ||
+    (error.code === 'E_REMOTE' &&
+      Array.isArray(error.details?.remoteHints) && error.details.remoteHints.includes('native-frame')))
+}
+
 /** Settle held permission decisions with an explicit deny. Cancellation and
  * shutdown must never leave a reverse request dangling; bounds stay tiny.
  * A module function, so prototype-only test doubles remain valid receivers.
@@ -44,7 +79,8 @@ export class AppServerBackend {
     // callback (the ACP client). Absent (probe default) -> deny/hold rules.
     this.onPermission = typeof options.onPermission === 'function' ? options.onPermission : null
     this.heldPermissions = new Map()
-    this.metrics = { preferences: 0, permissionsDenied: 0, unsupportedInteractions: 0,
+    this.permissionRequests = new Map()
+    this.metrics = { preferences: 0, permissionsDenied: 0, permissionsDeduped: 0, unsupportedInteractions: 0,
       unknownNotifications: 0, staleEvents: 0, unknownEvents: 0 }
     // Bounded wire vocabulary for failure diagnosis: type names and counts
     // only, never payloads. Consistent with reverseRpcMethods in reports.
@@ -86,7 +122,7 @@ export class AppServerBackend {
     if (returnedCwd !== undefined && (!idValue(returnedCwd) || await realpath(returnedCwd) !== canonical)) {
       throw new ProbeError('E_WORKSPACE')
     }
-    const state = { cwd: canonical, resumed: Boolean(sessionId), modelRebindAttempted: false, modelReference: null, lastSeq: -1, active: null, ready: false, finished: new Set() }
+    const state = { cwd: canonical, resumed: Boolean(sessionId), modelRebindAttempted: false, modelReference: null, lastSeq: -1, active: null, ready: false, fatal: false, finished: new Set() }
     this.sessions.set(id, state)
     try {
       // Attach state before subscribing: subscribe may emit its backlog before
@@ -358,7 +394,21 @@ export class AppServerBackend {
         turn.accepted = true
         if (turn.cancelOnStream && turn.streams > 0) this.cancel(id)
         this.complete(turn)
-      }, error => { turn.finish(error); void this.close() })
+      }, error => {
+        // A native frame rejection poisons the whole native session: name it
+        // as session-fatal so the layer above can recover once or fail fast
+        // with guidance, instead of relaying the same raw rejection forever.
+        // The transport still closes - the turn never started, but replaying
+        // the prompt over this process is not this layer's decision to make.
+        if (isNativeFrameRejection(error)) {
+          state.fatal = true
+          turn.finish(new ProbeError('E_SESSION_FATAL', error.rpcCode, error.details))
+          void this.close()
+          return
+        }
+        turn.finish(error)
+        void this.close()
+      })
     })
   }
 
@@ -471,27 +521,30 @@ export class AppServerBackend {
     }
     if (method === 'interaction/requestPermission') {
       const turn = this.sessions.get(params.sessionId)?.active
-      if (this.onPermission) {
-        // Decisions belong to the ACP client. Any callback failure denies;
-        // nothing here can manufacture an allow.
-        let decision = null
-        try { decision = await this.onPermission(params) } catch { decision = null }
-        if (decision?.decision === 'allow') return { decision: 'allow', reason: 'allowed by client' }
-        this.metrics.permissionsDenied++
-        if (turn) turn.denied++
-        return { decision: 'deny', reason: typeof decision?.reason === 'string' && decision.reason ? decision.reason : 'denied by client' }
+      // One pending tool call -> one delegated question. The native backend
+      // re-issues this reverse request for the SAME unanswered tool call with
+      // a fresh request id every few seconds; relaying each one floods the
+      // client with duplicate approval prompts (field report: 12-21 queued
+      // before the session died with a native frame error). Duplicates join
+      // the in-flight decision, and re-asks inside the memo window replay the
+      // client's recorded decision - a replay can only return what the client
+      // already chose for this exact tool call, never a new allow.
+      const key = permissionKey(params)
+      if (key === null) return this.#permissionDecision(params, turn)
+      const deduplicated = this.#deduplicatedPermission(key, turn)
+      if (deduplicated !== null) return deduplicated
+      const entry = { response: null, joins: 0, settled: null, value: null }
+      entry.response = Promise.resolve(this.#permissionDecision(params, turn))
+      entry.response.then(
+        value => { entry.settled = Date.now(); entry.value = value },
+        () => { entry.settled = Date.now(); entry.value = { decision: 'deny', reason: 'permission decision failed' } },
+      )
+      if (this.permissionRequests.size >= PERMISSION_ENTRY_LIMIT) {
+        // Bounded memory; joiners already hold the settled promise directly.
+        this.permissionRequests.delete(this.permissionRequests.keys().next().value)
       }
-      if (this.permissionMode === 'hold' && turn) {
-        // Hold the decision open: cancellation must settle the turn while the
-        // approval is still pending, never by silently approving it.
-        const held = this.heldPermissions.get(params.sessionId) ?? []
-        if (held.length >= 8) { this.metrics.permissionsDenied++; return { decision: 'deny', reason: 'Probe deny: held-permission bound exceeded' } }
-        this.heldPermissions.set(params.sessionId, held)
-        return new Promise(resolve => held.push(resolve))
-      }
-      this.metrics.permissionsDenied++
-      if (turn) turn.denied++
-      return { decision: 'deny', reason: 'Backend contract probe denies every permission request' }
+      this.permissionRequests.set(key, entry)
+      return entry.response
     }
     this.metrics.unsupportedInteractions++
     // The probe cannot perform browser/auth/user-input interactions. Reply with
@@ -499,8 +552,79 @@ export class AppServerBackend {
     throw new ProbeError('E_METHOD', -32601)
   }
 
+  /** Fast path for a re-sent permission request: join the still-pending
+   * decision, or replay the recorded decision within the backoff window.
+   * Returns null when this request is genuinely new (or the window expired). */
+  #deduplicatedPermission(key, turn) {
+    const entry = this.permissionRequests.get(key)
+    if (!entry) return null
+    if (entry.settled === null) {
+      if (entry.joins < PERMISSION_JOIN_LIMIT) {
+        entry.joins++
+        this.metrics.permissionsDeduped++
+        return entry.response
+      }
+      this.metrics.permissionsDenied++
+      if (turn) turn.denied++
+      return { decision: 'deny', reason: 'Probe deny: duplicate permission request bound exceeded' }
+    }
+    if (Date.now() - entry.settled <= PERMISSION_MEMO_MS) {
+      this.metrics.permissionsDeduped++
+      const replay = { ...entry.value }
+      // A replayed deny is still a deny for THIS turn; a replayed allow only
+      // returns what the client already granted for this exact tool call.
+      if (replay.decision !== 'allow') {
+        this.metrics.permissionsDenied++
+        if (turn) turn.denied++
+      }
+      return replay
+    }
+    this.permissionRequests.delete(key)
+    return null
+  }
+
+  /** Acquire ONE permission decision for a native request: from the ACP client
+   * when wired, otherwise the probe's hold/deny contract. Counters and turn
+   * denial accounting belong to the forwarded request only - duplicates are
+   * accounted by #deduplicatedPermission instead. */
+  async #permissionDecision(params, turn) {
+    if (this.onPermission) {
+      // Decisions belong to the ACP client. Any callback failure denies;
+      // nothing here can manufacture an allow.
+      let decision = null
+      try { decision = await this.onPermission(params) } catch { decision = null }
+      if (decision?.decision === 'allow') return { decision: 'allow', reason: 'allowed by client' }
+      this.metrics.permissionsDenied++
+      if (turn) turn.denied++
+      return { decision: 'deny', reason: typeof decision?.reason === 'string' && decision.reason ? decision.reason : 'denied by client' }
+    }
+    if (this.permissionMode === 'hold' && turn) {
+      // Hold the decision open: cancellation must settle the turn while the
+      // approval is still pending, never by silently approving it.
+      const held = this.heldPermissions.get(params.sessionId) ?? []
+      if (held.length >= 8) { this.metrics.permissionsDenied++; return { decision: 'deny', reason: 'Probe deny: held-permission bound exceeded' } }
+      this.heldPermissions.set(params.sessionId, held)
+      return new Promise(resolve => held.push(resolve))
+    }
+    this.metrics.permissionsDenied++
+    if (turn) turn.denied++
+    return { decision: 'deny', reason: 'Backend contract probe denies every permission request' }
+  }
+
   abortTurns(error) {
-    for (const state of this.sessions.values()) state.active?.finish(error)
+    // Transport faults settle active turns synchronously from onFault, BEFORE
+    // the pending send's rejection microtask runs - so the session-fatal
+    // classification must happen here too, or a framing break mid-send
+    // reaches the client as a raw transport error with no recovery.
+    for (const state of this.sessions.values()) {
+      if (!state.active) continue
+      if (isNativeFrameRejection(error)) {
+        state.fatal = true
+        state.active.finish(new ProbeError('E_SESSION_FATAL', error.rpcCode, error.details))
+        continue
+      }
+      state.active.finish(error)
+    }
   }
   close() {
     this.abortTurns(new ProbeError('E_CLOSED'))

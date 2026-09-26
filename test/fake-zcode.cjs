@@ -10,6 +10,7 @@ let sessions = {}
 try { sessions = JSON.parse(fs.readFileSync(storage, 'utf8')) } catch {}
 const active = new Map()
 const backwards = new Map()
+const resumedHere = new Set() // frame-transient: corruption heals on in-process resume
 let heldAck
 const heldResponses = []
 let reverseId = 1 // Deliberately collides with the client's first request ID.
@@ -103,6 +104,7 @@ async function handle(frame) {
   if (method === 'session/resume') {
     const s = sessions[params.sessionId]
     if (!s) { error(id, -32004); return }
+    resumedHere.add(params.sessionId)
     reply(id, { session: { sessionId: fault === 'wrong-resume' ? 'wrong' : params.sessionId,
       workspace: { workspacePath: s.cwd, workspaceKey: s.cwd } } }); return
   }
@@ -196,6 +198,30 @@ async function handle(frame) {
     return
   }
   if (method !== 'session/send') { error(id); return }
+  // Native frame rejection (2026-09-26 field report): the session answers
+  // "Internal error: E_FRAME" and every later send is rejected the same way
+  // in milliseconds. frame-transient models process-local damage that a fresh
+  // process + resume heals; frame-brick persists across processes.
+  if (fault === 'frame-brick' || sessions[params.sessionId].bricked ||
+      (fault === 'frame-transient' && !resumedHere.has(params.sessionId))) {
+    if (fault === 'frame-brick') { sessions[params.sessionId].bricked = true; persist() }
+    send({ id, error: { code: -32603, message: 'Internal error: E_FRAME' } })
+    return
+  }
+  // Live retest manifestation (2026-09-26, real 0.16.5): the same session-
+  // bricking fault arrives with NO error response - stdout framing breaks
+  // (unparsable bytes) while the send is still pending. frame-wire models
+  // process-local damage healed by a fresh process + resume; frame-wire-brick
+  // persists in the session store and re-breaks in every process.
+  if (sessions[params.sessionId].wireBricked === true ||
+      fault === 'frame-wire-brick' ||
+      (fault === 'frame-wire' && !resumedHere.has(params.sessionId))) {
+    if (fault === 'frame-wire-brick' && sessions[params.sessionId].wireBricked !== true) {
+      sessions[params.sessionId].wireBricked = true; persist()
+    }
+    process.stdout.write('E_FRAME synthetic-wire-break not-json no-envelope\n')
+    return
+  }
   if (active.has(params.sessionId)) { error(id, -32010); return }
   const sid = params.sessionId
   const turnId = `turn_${randomUUID()}`
@@ -220,7 +246,18 @@ async function handle(frame) {
     // Realistic tool lifecycle: scheduled -> started -> permission -> outcome.
     event(sid, 'tool.updated', { turnId, kind: 'scheduled', toolCallId: 'tool_write_1', toolName: 'write_file', input: { path: 'deny-sentinel.txt' } })
     event(sid, 'tool.updated', { turnId, kind: 'started', toolCallId: 'tool_write_1', startedAt: 1 })
-    const permission = await reverse('interaction/requestPermission', { sessionId: sid, requestId: 'test', toolCallId: 'tool_write_1', toolName: 'write_file', riskLevel: 'medium', reason: 'write', input: { path: 'deny-sentinel.txt' } })
+    const permissionParams = { sessionId: sid, requestId: 'test', toolCallId: 'tool_write_1', toolName: 'write_file', riskLevel: 'medium', reason: 'write', input: { path: 'deny-sentinel.txt' } }
+    let permission
+    if (fault === 'permission-retry') {
+      // Native re-send storm (field report, compressed): the SAME unanswered
+      // tool call is re-requested with fresh request ids, each expecting its
+      // own response, until the session eventually dies.
+      const resent = []
+      for (let i = 0; i < 6; i++) resent.push(reverse('interaction/requestPermission', { ...permissionParams, requestId: `retry-${i}` }))
+      permission = (await Promise.all(resent))[0]
+    } else {
+      permission = await reverse('interaction/requestPermission', permissionParams)
+    }
     const denied = permission?.decision === 'deny'
     event(sid, 'tool.updated', { turnId, kind: denied ? 'error' : 'result', toolCallId: 'tool_write_1',
       ...(denied ? { error: { type: 'permission_denied', message: 'denied by client' } } : { result: { output: 'written' }, duration: 1 }) })

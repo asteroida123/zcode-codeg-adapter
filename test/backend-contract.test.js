@@ -149,12 +149,95 @@ test('Backend: send rejection cannot be disguised as success', async t => {
   const id = await client.open(cwd)
   await assert.rejects(client.prompt(id, 'hi'), code('E_REMOTE'))
 })
+test('Backend: a native frame send rejection is session-fatal, not a generic remote error', async t => {
+  // Field regression (2026-09-26): "Internal error: E_FRAME" once bricked the
+  // session while every later prompt relayed the same raw rejection.
+  const { client, cwd } = await fixture(t, 'frame-brick', true)
+  const id = await client.open(cwd)
+  await assert.rejects(client.prompt(id, 'hi'), error => {
+    assert.equal(error.code, 'E_SESSION_FATAL')
+    assert.equal(error.rpcCode, -32603)
+    assert.deepEqual(error.details.remoteHints, ['native-frame'])
+    assert.ok(!JSON.stringify(error).includes('SYNTHETIC-SECRET'))
+    return true
+  })
+  // The poisoned transport closes; this layer never replays prompts over it.
+  await assert.rejects(client.prompt(id, 'again'), code('E_CLOSED'))
+})
+test('Backend: a transport framing break during a pending send is session-fatal', async t => {
+  // Live-retest regression (2026-09-26, real 0.16.5): the same session-bricking
+  // fault arrives with NO error response - stdout framing breaks while the
+  // send is pending, surfacing as the local E_FRAME transport fault. The raw
+  // transport code must be classified session-fatal, not relayed verbatim.
+  const { client, cwd } = await fixture(t, 'frame-wire', true)
+  const id = await client.open(cwd)
+  await assert.rejects(client.prompt(id, 'hi'), error => {
+    assert.equal(error.code, 'E_SESSION_FATAL')
+    assert.ok(!JSON.stringify(error).includes('synthetic-wire-break'), 'no raw wire bytes ride the error')
+    return true
+  })
+  await assert.rejects(client.prompt(id, 'again'), code('E_CLOSED'))
+})
 test('Backend: permission denial has a tested negative filesystem effect', async t => {
   const { client, cwd } = await fixture(t, '', true)
   const id = await client.open(cwd, { mode: 'build' })
   const result = await client.prompt(id, 'Write deny-sentinel.txt once')
   assert.equal(result.denied, 1)
   assert.equal(result.tools, 1)
+  await assert.rejects(access(join(cwd, 'deny-sentinel.txt')), { code: 'ENOENT' })
+})
+test('Backend: re-sent permission requests for one tool call forward once', async t => {
+  // Field regression: the native backend re-issues interaction/requestPermission
+  // for the SAME pending tool call with fresh request ids; each one used to
+  // become a separate client question (12-21 queued in the field report).
+  const forwarded = []
+  const { client, cwd } = await fixture(t, 'permission-retry', true, {
+    onPermission: async params => {
+      forwarded.push(params)
+      // Re-sends arrive while the first question is still unanswered.
+      await new Promise(resolve => setTimeout(resolve, 30))
+      return { decision: 'allow', reason: 'client allowed' }
+    },
+  })
+  const id = await client.open(cwd, { mode: 'build' })
+  const result = await client.prompt(id, 'Write deny-sentinel.txt once')
+  assert.equal(forwarded.length, 1, 'one client question per pending tool call')
+  assert.equal(client.metrics.permissionsDeduped, 5, 'five re-sends joined the in-flight decision')
+  assert.equal(result.denied, 0)
+  assert.equal((await readFile(join(cwd, 'deny-sentinel.txt'), 'utf8')), 'unexpected write')
+})
+test('Backend: a re-ask inside the backoff window replays the recorded decision', async t => {
+  const forwarded = []
+  const { client, cwd } = await fixture(t, '', true, {
+    onPermission: async params => { forwarded.push(params); return { decision: 'deny', reason: 'client said no' } },
+  })
+  const id = await client.open(cwd, { mode: 'build' })
+  const first = await client.prompt(id, 'Write deny-sentinel.txt once')
+  assert.equal(first.denied, 1)
+  // The synthetic CLI re-uses the tool call id on the next turn, standing in
+  // for a native re-ask of the same tool call.
+  const second = await client.prompt(id, 'Write deny-sentinel.txt once')
+  assert.equal(forwarded.length, 1, 'the re-ask replays the recorded deny without a new client question')
+  assert.equal(second.denied, 1, 'a replayed deny still counts as denied for the turn')
+  assert.equal(client.metrics.permissionsDeduped, 1)
+  await assert.rejects(access(join(cwd, 'deny-sentinel.txt')), { code: 'ENOENT' })
+})
+test('Backend: a re-ask after the backoff window expires asks the client again', async t => {
+  const forwarded = []
+  const { client, cwd } = await fixture(t, '', true, {
+    onPermission: async params => { forwarded.push(params); return { decision: 'deny', reason: 'client said no' } },
+  })
+  const id = await client.open(cwd, { mode: 'build' })
+  await client.prompt(id, 'Write deny-sentinel.txt once')
+  assert.equal(forwarded.length, 1)
+  // Age the memoized decision past the 30s window (clock surgery on the
+  // recorded settle time - the assertion target, not a 30s wall-clock wait).
+  const entry = client.permissionRequests.values().next().value
+  assert.ok(entry && entry.settled !== null, 'the settled decision is memoized by session + tool call')
+  entry.settled -= 31000
+  const second = await client.prompt(id, 'Write deny-sentinel.txt once')
+  assert.equal(forwarded.length, 2, 'an expired memo forwards a fresh client question')
+  assert.equal(second.denied, 1)
   await assert.rejects(access(join(cwd, 'deny-sentinel.txt')), { code: 'ENOENT' })
 })
 test('Backend: concurrent prompt in one session is rejected', async t => {
@@ -294,6 +377,17 @@ test('Diagnostics: categories never retain message, cause, paths, tokens or arbi
     assert.ok(!JSON.stringify(error).includes('SECRET'))
     assert.ok(!JSON.stringify(error).includes('/private'))
     assert.equal(error.cause, undefined)
+    return true
+  })
+})
+
+test('Diagnostics: native frame rejections classify as native-frame without copying text', async t => {
+  const { client } = await fixture(t)
+  await assert.rejects(client.request('test/error-details', { error: { code: -32603,
+    message: 'Internal error: E_FRAME sk-SYNTHETIC-SECRET /private/path' } }), error => {
+    assert.deepEqual(diagnostic(error), { code: 'E_REMOTE', rpcCode: -32603,
+      remoteMessagePresent: true, remoteHints: ['native-frame'] })
+    assert.ok(!JSON.stringify(error).includes('SYNTHETIC-SECRET'))
     return true
   })
 })
