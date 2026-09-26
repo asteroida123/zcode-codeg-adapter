@@ -208,6 +208,20 @@ async function handle(frame) {
     send({ id, error: { code: -32603, message: 'Internal error: E_FRAME' } })
     return
   }
+  // Live retest manifestation (2026-09-26, real 0.16.5): the same session-
+  // bricking fault arrives with NO error response - stdout framing breaks
+  // (unparsable bytes) while the send is still pending. frame-wire models
+  // process-local damage healed by a fresh process + resume; frame-wire-brick
+  // persists in the session store and re-breaks in every process.
+  if (sessions[params.sessionId].wireBricked === true ||
+      fault === 'frame-wire-brick' ||
+      (fault === 'frame-wire' && !resumedHere.has(params.sessionId))) {
+    if (fault === 'frame-wire-brick' && sessions[params.sessionId].wireBricked !== true) {
+      sessions[params.sessionId].wireBricked = true; persist()
+    }
+    process.stdout.write('E_FRAME synthetic-wire-break not-json no-envelope\n')
+    return
+  }
   if (active.has(params.sessionId)) { error(id, -32010); return }
   const sid = params.sessionId
   const turnId = `turn_${randomUUID()}`

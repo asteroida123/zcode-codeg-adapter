@@ -164,6 +164,20 @@ test('Backend: a native frame send rejection is session-fatal, not a generic rem
   // The poisoned transport closes; this layer never replays prompts over it.
   await assert.rejects(client.prompt(id, 'again'), code('E_CLOSED'))
 })
+test('Backend: a transport framing break during a pending send is session-fatal', async t => {
+  // Live-retest regression (2026-09-26, real 0.16.5): the same session-bricking
+  // fault arrives with NO error response - stdout framing breaks while the
+  // send is pending, surfacing as the local E_FRAME transport fault. The raw
+  // transport code must be classified session-fatal, not relayed verbatim.
+  const { client, cwd } = await fixture(t, 'frame-wire', true)
+  const id = await client.open(cwd)
+  await assert.rejects(client.prompt(id, 'hi'), error => {
+    assert.equal(error.code, 'E_SESSION_FATAL')
+    assert.ok(!JSON.stringify(error).includes('synthetic-wire-break'), 'no raw wire bytes ride the error')
+    return true
+  })
+  await assert.rejects(client.prompt(id, 'again'), code('E_CLOSED'))
+})
 test('Backend: permission denial has a tested negative filesystem effect', async t => {
   const { client, cwd } = await fixture(t, '', true)
   const id = await client.open(cwd, { mode: 'build' })

@@ -34,11 +34,17 @@ const PERMISSION_ENTRY_LIMIT = 64
 /** A native frame rejection is session-level, not request-level: the field
  * report (2026-09-26) shows the backend answering "Internal error: E_FRAME"
  * and then rejecting every later prompt on that session identically within
- * ~5ms. Recognized solely by the bounded native-frame hint - never by copying
- * remote message text. */
+ * ~5ms. The live retest on the real 0.16.5 backend (same day) exposed a
+ * second, transport-level manifestation of the same fault: no error response
+ * arrives at all - the backend breaks stdout framing (unparsable bytes or
+ * EOF with a partial line) while the send is still pending, surfacing as the
+ * LOCAL E_FRAME transport fault. Both shapes brick the session identically;
+ * neither is a per-request failure. Recognized by the bounded native-frame
+ * hint or the local transport code - never by copying remote message text. */
 function isNativeFrameRejection(error) {
-  return error instanceof ProbeError && error.code === 'E_REMOTE' &&
-    Array.isArray(error.details?.remoteHints) && error.details.remoteHints.includes('native-frame')
+  return error instanceof ProbeError && (error.code === 'E_FRAME' ||
+    (error.code === 'E_REMOTE' &&
+      Array.isArray(error.details?.remoteHints) && error.details.remoteHints.includes('native-frame')))
 }
 
 /** Settle held permission decisions with an explicit deny. Cancellation and
@@ -606,7 +612,19 @@ export class AppServerBackend {
   }
 
   abortTurns(error) {
-    for (const state of this.sessions.values()) state.active?.finish(error)
+    // Transport faults settle active turns synchronously from onFault, BEFORE
+    // the pending send's rejection microtask runs - so the session-fatal
+    // classification must happen here too, or a framing break mid-send
+    // reaches the client as a raw transport error with no recovery.
+    for (const state of this.sessions.values()) {
+      if (!state.active) continue
+      if (isNativeFrameRejection(error)) {
+        state.fatal = true
+        state.active.finish(new ProbeError('E_SESSION_FATAL', error.rpcCode, error.details))
+        continue
+      }
+      state.active.finish(error)
+    }
   }
   close() {
     this.abortTurns(new ProbeError('E_CLOSED'))
