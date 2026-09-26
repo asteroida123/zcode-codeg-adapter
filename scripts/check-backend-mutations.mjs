@@ -7,6 +7,11 @@ import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import assert from 'node:assert/strict'
 const root = fileURLToPath(new URL('../', import.meta.url))
+// Line endings are a checkout artifact, never part of the contract: a Windows
+// checkout (core.autocrlf=true) yields CRLF, and a multi-line needle would then
+// match zero times. Normalise both sides before matching; the mutated file is
+// written to a disposable temp copy, so writing it back as LF is fine.
+const lf = (text) => text.replace(/\r\n/g, '\n')
 const cases = [
   { name: 'private error opt-in', file: 'spikes/backend-contract/probe.mjs', testFile: 'test/local-error.test.js',
     pattern: 'Local diagnostics: default failure',
@@ -57,10 +62,12 @@ for (const mutation of cases) {
       { cwd: dir, encoding: 'utf8', timeout: 15000, maxBuffer: 1024 * 1024 })
     assert.equal(run().status, 0, `${mutation.name}: baseline must pass`)
     const path = join(dir, mutation.file)
-    const source = await readFile(path, 'utf8')
-    assert.equal(source.split(mutation.before).length, 2, 'Mutation must match exactly once')
-    await writeFile(path, source.replace(mutation.before, mutation.after))
-    assert.ok((await readFile(path, 'utf8')).includes(mutation.after), 'Verify mutation actually landed')
+    const source = lf(await readFile(path, 'utf8'))
+    const before = lf(mutation.before)
+    const after = lf(mutation.after)
+    assert.equal(source.split(before).length, 2, 'Mutation must match exactly once')
+    await writeFile(path, source.replace(before, after))
+    assert.ok(lf(await readFile(path, 'utf8')).includes(after), 'Verify mutation actually landed')
     const result = run()
     assert.equal(result.status, 1, `${mutation.name}: mutated test must fail, not hang or pass`)
     assert.ok(result.stdout.includes('not ok') && result.stdout.includes('# fail 1'), 'Must be an assertion failure')

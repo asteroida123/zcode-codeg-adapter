@@ -1,0 +1,8 @@
+# Normalise the working tree to LF on every platform.
+#
+# Several checkers compare source text directly — scripts/check-backend-mutations.mjs
+# matches multi-line needles against src/backend/*.mjs — so a Windows checkout with
+# core.autocrlf=true would silently turn those needles into zero matches and fail
+# the suite there while passing everywhere else. text=auto still leaves binary
+# files alone; only text files are normalised.
+* text=auto eol=lf
