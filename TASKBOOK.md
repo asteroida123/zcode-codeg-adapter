@@ -148,7 +148,31 @@ node scripts/probe-zcode.mjs --live --zcode "/Applications/ZCode.app/Contents/Re
 
 交付需要代码、回归、真实证据、Codeg 改动、安装文档五者同时可查，不以测试数量或 CI 绿色单独验收。
 
-## 6. 本地命令与执行约束
+### T7 / P0：ZCode 父委托链路三缺陷加固（2026-09-26 集成线实测）
+
+背景：ZCode 桌面 0.16.5 + 本 adapter 0.1.4。ZCode 会话工具表已挂上完整
+codeg-mcp 工具集，ZCode→codex 委托端到端可通；实测暴露三个"ZCode 作为父
+智能体委托他人"链路上的真实阻断点。分支 `feat/parent-delegation-hardening`，
+每缺陷一个提交。以下修复均为 adapter 侧行为 + 合成回归钉住；真实后端复测
+（185s 权限风暴场景、E_FRAME 后 recycle 实效、真机 preferred mode）待下一轮
+本机授权后执行，未跑过不宣称通过。
+
+1. **权限请求风暴**（`src/backend/backend.mjs`）
+   - 实测现象：一条 MCP 工具调用触发的 `interaction/requestPermission` 未应答
+     期间，原生后端每 2-10 秒用**新 request id** 重发同一 tool_call 的权限请求；
+     adapter 1:1 透传成 `session/request_permission`，客户端排队 12-21 条；约
+     185 秒后后端以 `Internal error: E_FRAME` 拒绝。
+   - 修复：`reverseRequest` 按 `(sessionId, toolCallId)` 去重——同一在途
+     tool_call 只向 ACP 客户端转发一次，重复 reverse 请求 **join** 同一决策
+     （每个 reverse id 仍各自得到响应，不悬挂）；决策落定后 30 秒退避窗口内
+     的重问**重放**已记录决策（重放的 allow 只可能是客户端对该 tool_call 已
+     给出的选择，重放的 deny 仍计入当轮 denied）。上限：join 32、条目 64；
+     新增 `metrics.permissionsDeduped` 计数。
+   - 回归：fake 新增 `permission-retry`（6 连发同 tool_call、各自待响应），
+     断言客户端只见 1 条且 6 个 reverse id 全部被应答；另钉住窗口内重问不
+     重新弹窗、跨窗口会重新询问。mutation：join 返回值置 null 必须红。
+
+
 
 以下基线检查不需要 npm 安装或真实账号：
 

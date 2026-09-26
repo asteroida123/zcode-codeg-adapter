@@ -220,7 +220,18 @@ async function handle(frame) {
     // Realistic tool lifecycle: scheduled -> started -> permission -> outcome.
     event(sid, 'tool.updated', { turnId, kind: 'scheduled', toolCallId: 'tool_write_1', toolName: 'write_file', input: { path: 'deny-sentinel.txt' } })
     event(sid, 'tool.updated', { turnId, kind: 'started', toolCallId: 'tool_write_1', startedAt: 1 })
-    const permission = await reverse('interaction/requestPermission', { sessionId: sid, requestId: 'test', toolCallId: 'tool_write_1', toolName: 'write_file', riskLevel: 'medium', reason: 'write', input: { path: 'deny-sentinel.txt' } })
+    const permissionParams = { sessionId: sid, requestId: 'test', toolCallId: 'tool_write_1', toolName: 'write_file', riskLevel: 'medium', reason: 'write', input: { path: 'deny-sentinel.txt' } }
+    let permission
+    if (fault === 'permission-retry') {
+      // Native re-send storm (field report, compressed): the SAME unanswered
+      // tool call is re-requested with fresh request ids, each expecting its
+      // own response, until the session eventually dies.
+      const resent = []
+      for (let i = 0; i < 6; i++) resent.push(reverse('interaction/requestPermission', { ...permissionParams, requestId: `retry-${i}` }))
+      permission = (await Promise.all(resent))[0]
+    } else {
+      permission = await reverse('interaction/requestPermission', permissionParams)
+    }
     const denied = permission?.decision === 'deny'
     event(sid, 'tool.updated', { turnId, kind: denied ? 'error' : 'result', toolCallId: 'tool_write_1',
       ...(denied ? { error: { type: 'permission_denied', message: 'denied by client' } } : { result: { output: 'written' }, duration: 1 }) })

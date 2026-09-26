@@ -30,6 +30,9 @@ const cases = [
   { name: 'reverse-request namespace', file: 'src/backend/rpc.mjs', pattern: 'RPC: reverse request ID',
     before: '    if (hasMethod) {',
     after: '    if (hasMethod && hasId && this.pending.has(frame.id)) { this.pending.get(frame.id)(null, frame.params); return }\n    if (hasMethod) {' },
+  { name: 'permission re-send dedupe', file: 'src/backend/backend.mjs', pattern: 'Backend: re-sent permission requests',
+    before: '        this.metrics.permissionsDeduped++\n        return entry.response',
+    after: '        this.metrics.permissionsDeduped++\n        return null' },
 ]
 for (const mutation of cases) {
   const dir = await mkdtemp(join(tmpdir(), 'zcode-mutation-'))

@@ -272,6 +272,20 @@ test('ACP: allow decision writes the file and completes the tool', async t => {
   assert.equal(written, 'unexpected write')
 })
 
+test('ACP: a native permission re-send storm surfaces as one client question', async t => {
+  // Field regression (2026-09-26 integration line): six native re-requests of
+  // one unanswered tool call used to queue six identical approval prompts on
+  // the client before the session died with a native frame error.
+  const { request, permissions, cwd } = await start(t, { fault: 'permission-retry', permission: 'deny' })
+  const created = await request('session/new', { cwd, mcpServers: [] })
+  const prompted = await request('session/prompt', {
+    sessionId: created.result.sessionId, prompt: [{ type: 'text', text: 'Write deny-sentinel.txt once' }],
+  })
+  assert.equal(prompted.result?.stopReason, 'end_turn')
+  assert.equal(permissions.length, 1, 'six native re-sends must surface as one client question')
+  await assert.rejects(access(join(cwd, 'deny-sentinel.txt')), { code: 'ENOENT' })
+})
+
 test('ACP: native permission kinds outside the ACP enum are mapped, not passed through', async t => {
   const { request, cwd } = await start(t)
   const created = await request('session/new', { cwd, mcpServers: [] })

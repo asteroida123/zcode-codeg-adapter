@@ -157,6 +157,60 @@ test('Backend: permission denial has a tested negative filesystem effect', async
   assert.equal(result.tools, 1)
   await assert.rejects(access(join(cwd, 'deny-sentinel.txt')), { code: 'ENOENT' })
 })
+test('Backend: re-sent permission requests for one tool call forward once', async t => {
+  // Field regression: the native backend re-issues interaction/requestPermission
+  // for the SAME pending tool call with fresh request ids; each one used to
+  // become a separate client question (12-21 queued in the field report).
+  const forwarded = []
+  const { client, cwd } = await fixture(t, 'permission-retry', true, {
+    onPermission: async params => {
+      forwarded.push(params)
+      // Re-sends arrive while the first question is still unanswered.
+      await new Promise(resolve => setTimeout(resolve, 30))
+      return { decision: 'allow', reason: 'client allowed' }
+    },
+  })
+  const id = await client.open(cwd, { mode: 'build' })
+  const result = await client.prompt(id, 'Write deny-sentinel.txt once')
+  assert.equal(forwarded.length, 1, 'one client question per pending tool call')
+  assert.equal(client.metrics.permissionsDeduped, 5, 'five re-sends joined the in-flight decision')
+  assert.equal(result.denied, 0)
+  assert.equal((await readFile(join(cwd, 'deny-sentinel.txt'), 'utf8')), 'unexpected write')
+})
+test('Backend: a re-ask inside the backoff window replays the recorded decision', async t => {
+  const forwarded = []
+  const { client, cwd } = await fixture(t, '', true, {
+    onPermission: async params => { forwarded.push(params); return { decision: 'deny', reason: 'client said no' } },
+  })
+  const id = await client.open(cwd, { mode: 'build' })
+  const first = await client.prompt(id, 'Write deny-sentinel.txt once')
+  assert.equal(first.denied, 1)
+  // The synthetic CLI re-uses the tool call id on the next turn, standing in
+  // for a native re-ask of the same tool call.
+  const second = await client.prompt(id, 'Write deny-sentinel.txt once')
+  assert.equal(forwarded.length, 1, 'the re-ask replays the recorded deny without a new client question')
+  assert.equal(second.denied, 1, 'a replayed deny still counts as denied for the turn')
+  assert.equal(client.metrics.permissionsDeduped, 1)
+  await assert.rejects(access(join(cwd, 'deny-sentinel.txt')), { code: 'ENOENT' })
+})
+test('Backend: a re-ask after the backoff window expires asks the client again', async t => {
+  const forwarded = []
+  const { client, cwd } = await fixture(t, '', true, {
+    onPermission: async params => { forwarded.push(params); return { decision: 'deny', reason: 'client said no' } },
+  })
+  const id = await client.open(cwd, { mode: 'build' })
+  await client.prompt(id, 'Write deny-sentinel.txt once')
+  assert.equal(forwarded.length, 1)
+  // Age the memoized decision past the 30s window (clock surgery on the
+  // recorded settle time - the assertion target, not a 30s wall-clock wait).
+  const entry = client.permissionRequests.values().next().value
+  assert.ok(entry && entry.settled !== null, 'the settled decision is memoized by session + tool call')
+  entry.settled -= 31000
+  const second = await client.prompt(id, 'Write deny-sentinel.txt once')
+  assert.equal(forwarded.length, 2, 'an expired memo forwards a fresh client question')
+  assert.equal(second.denied, 1)
+  await assert.rejects(access(join(cwd, 'deny-sentinel.txt')), { code: 'ENOENT' })
+})
 test('Backend: concurrent prompt in one session is rejected', async t => {
   const { client, cwd } = await fixture(t, '', true)
   const id = await client.open(cwd)
