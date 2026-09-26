@@ -171,6 +171,25 @@ codeg-mcp 工具集，ZCode→codex 委托端到端可通；实测暴露三个"Z
    - 回归：fake 新增 `permission-retry`（6 连发同 tool_call、各自待响应），
      断言客户端只见 1 条且 6 个 reverse id 全部被应答；另钉住窗口内重问不
      重新弹窗、跨窗口会重新询问。mutation：join 返回值置 null 必须红。
+2. **E_FRAME 会话砖化**（`src/backend/diagnostics.mjs`、`src/backend/backend.mjs`、`src/acp/server.mjs`）
+   - 实测现象：后端一旦返回 `Internal error: E_FRAME`，该 session 后续所有
+     prompt 约 5ms 内被同样拒绝；adapter 原行为是每次 prompt 原样转发底层错误。
+   - 修复：diagnostics 新增闭枚举 hint `native-frame`（`\bE_FRAME\b` 符号/文本
+     识别，不复制远端文本）；`session/send` 拒绝命中该 hint 时归一为
+     `E_SESSION_FATAL`（携带 rpcCode 与 hints）并照旧关闭传输。ACP 层做
+     **恰好一次**恢复尝试：复用 cancel 路径的 recycle（新后端进程 + resume
+     同一原生会话 + read 校验），成功则错误信息明确指引"重试一次"；resume
+     失败或恢复后再次 E_FRAME 则标记永久 fatal——此后每次 prompt 立即返回
+     同一条可操作错误（"close this session and create a new one"），不再触
+     后端。失败 prompt 不自动重放（是否重发由客户端决定）；恢复后有一次
+     成功 prompt 即重置计数（新的砖化事件有自己的恢复机会）。
+   - 边界（如实记录）：resume+read 只证明传输与读回正常，**不证明 send 可
+     用**，故恢复后首条 prompt 若再 E_FRAME 才升级永久 fatal；后端没有任何
+     "重建会话/健康探测"动词，adapter 侧更深的恢复需要 ZCode 后端支持。
+   - 回归：fake 新增 `frame-transient`（进程内损坏，resume 痊愈）与
+     `frame-brick`（持久砖化）；分别钉住"恢复后重试成功"与"三次 prompt 的
+     错误语义：第一条含恢复结果、第二/三条为同一稳定错误"。mutation：
+     native-frame 分类改判 request-schema 必须红。
 
 
 

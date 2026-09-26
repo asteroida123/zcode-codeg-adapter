@@ -13,6 +13,7 @@ export const REVERSE_METHODS = new Set([
 export const REMOTE_HINTS = new Set([
   'model-configuration', 'runtime-model-unavailable', 'authentication', 'filesystem-access',
   'file-missing', 'runtime-dependency', 'state-store', 'request-schema', 'network',
+  'native-frame',
 ])
 const SYMBOLS = new Map([
   ['ZCODE_RUNTIME_MODEL_UNAVAILABLE', 'runtime-model-unavailable'],
@@ -27,6 +28,7 @@ const SYMBOLS = new Map([
   ['INVALID_PARAMS', 'request-schema'], ['invalid_type', 'request-schema'],
   ['invalid_union', 'request-schema'], ['unrecognized_keys', 'request-schema'],
   ['ECONNREFUSED', 'network'], ['ENOTFOUND', 'network'], ['ETIMEDOUT', 'network'],
+  ['E_FRAME', 'native-frame'],
 ])
 const PATTERNS = [
   ['runtime-model-unavailable', /\bZCODE_RUNTIME_MODEL_UNAVAILABLE\b|历史任务使用的模型已不可用/],
@@ -38,6 +40,7 @@ const PATTERNS = [
   ['state-store', /\bSQLITE_(?:BUSY|CANTOPEN|CORRUPT)\b|database is locked|unable to open database/i],
   ['request-schema', /\b(?:invalid params|invalid parameters|invalid_type|invalid_union|unrecognized_keys)\b/i],
   ['network', /\b(?:ECONNREFUSED|ENOTFOUND|ETIMEDOUT|ENETUNREACH|ECONNRESET)\b/],
+  ['native-frame', /\bE_FRAME\b/],
 ]
 
 /** Lossy, bounded indicators only, NOT a root-cause diagnosis or log scrubber.

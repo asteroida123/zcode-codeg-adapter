@@ -31,6 +31,16 @@ const PERMISSION_JOIN_LIMIT = 32
 const PERMISSION_MEMO_MS = 30000
 const PERMISSION_ENTRY_LIMIT = 64
 
+/** A native frame rejection is session-level, not request-level: the field
+ * report (2026-09-26) shows the backend answering "Internal error: E_FRAME"
+ * and then rejecting every later prompt on that session identically within
+ * ~5ms. Recognized solely by the bounded native-frame hint - never by copying
+ * remote message text. */
+function isNativeFrameRejection(error) {
+  return error instanceof ProbeError && error.code === 'E_REMOTE' &&
+    Array.isArray(error.details?.remoteHints) && error.details.remoteHints.includes('native-frame')
+}
+
 /** Settle held permission decisions with an explicit deny. Cancellation and
  * shutdown must never leave a reverse request dangling; bounds stay tiny.
  * A module function, so prototype-only test doubles remain valid receivers.
@@ -106,7 +116,7 @@ export class AppServerBackend {
     if (returnedCwd !== undefined && (!idValue(returnedCwd) || await realpath(returnedCwd) !== canonical)) {
       throw new ProbeError('E_WORKSPACE')
     }
-    const state = { cwd: canonical, resumed: Boolean(sessionId), modelRebindAttempted: false, modelReference: null, lastSeq: -1, active: null, ready: false, finished: new Set() }
+    const state = { cwd: canonical, resumed: Boolean(sessionId), modelRebindAttempted: false, modelReference: null, lastSeq: -1, active: null, ready: false, fatal: false, finished: new Set() }
     this.sessions.set(id, state)
     try {
       // Attach state before subscribing: subscribe may emit its backlog before
@@ -378,7 +388,21 @@ export class AppServerBackend {
         turn.accepted = true
         if (turn.cancelOnStream && turn.streams > 0) this.cancel(id)
         this.complete(turn)
-      }, error => { turn.finish(error); void this.close() })
+      }, error => {
+        // A native frame rejection poisons the whole native session: name it
+        // as session-fatal so the layer above can recover once or fail fast
+        // with guidance, instead of relaying the same raw rejection forever.
+        // The transport still closes - the turn never started, but replaying
+        // the prompt over this process is not this layer's decision to make.
+        if (isNativeFrameRejection(error)) {
+          state.fatal = true
+          turn.finish(new ProbeError('E_SESSION_FATAL', error.rpcCode, error.details))
+          void this.close()
+          return
+        }
+        turn.finish(error)
+        void this.close()
+      })
     })
   }
 

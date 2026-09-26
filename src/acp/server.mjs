@@ -40,6 +40,20 @@ function textFromPromptBlocks(blocks) {
     .map(block => block.text).join('\n').slice(0, 65536)
 }
 
+/** Stable, actionable session-fatal error. Two texts only: one after a
+ * bounded recovery attempt that the client may retry, one canonical text for
+ * every later prompt on a session that cannot be recovered adapter-side. */
+function sessionFatalError(message) {
+  const error = new Error(message)
+  error.code = 'E_SESSION_FATAL'
+  return error
+}
+const SESSION_FATAL_RECOVERED = 'E_SESSION_FATAL: the native session rejected the prompt with a frame error;' +
+  ' the backend process was recycled and the native session resumed - retry this prompt once,' +
+  ' and if it fails again close this session and create a new one'
+const SESSION_FATAL_PERMANENT = 'E_SESSION_FATAL: the native session rejects every prompt with a frame error' +
+  ' and cannot be recovered adapter-side; close this session and create a new one'
+
 function toolKindFor(toolName) {
   const name = typeof toolName === 'string' ? toolName.toLowerCase() : ''
   if (/(edit|write|create|patch|apply)/.test(name)) return 'edit'
@@ -228,6 +242,9 @@ export class ZcodeCodegAgent {
   async prompt(params) {
     const session = this.#sessions.get(params.sessionId)
     if (!session) throw new Error('unknown session')
+    // A session the native backend bricked with a frame error fails fast with
+    // stable guidance; the prompt is not relayed back into a dead session.
+    if (session.fatal) throw sessionFatalError(SESSION_FATAL_PERMANENT)
     const content = textFromPromptBlocks(params.prompt)
     // Runtime supply order: what the native side published wins; otherwise a
     // descriptor built from the adapter config and the native-published model
@@ -253,7 +270,15 @@ export class ZcodeCodegAgent {
           }
         },
       })
+      // A completed prompt proves the session runs again; a future frame
+      // rejection is a new event with its own recovery attempt.
+      session.fatalCount = 0
     } catch (error) {
+      // A native frame rejection bricked the session. One bounded recovery
+      // attempt (recycle + resume), then permanent fail-fast. The failed
+      // prompt is never auto-replayed here - whether to resend is the
+      // client's decision, made with an honest error.
+      if (error?.code === 'E_SESSION_FATAL') throw await this.#handleSessionFatal(params.sessionId, session)
       // The 0.16.5 stop defect makes protocol cancellation unconfirmable.
       // Recycle the backend process and resume the native session so the
       // session stays usable, then surface the cancellation honestly as a
@@ -311,7 +336,8 @@ export class ZcodeCodegAgent {
     try {
       const backend = this.#backendFactory(session.cwd, this.#conn)
       await backend.open(session.cwd, { sessionId })
-      const fresh = { backend, sessionId, cwd: session.cwd, seenToolCallIds: new Set() }
+      const fresh = { backend, sessionId, cwd: session.cwd, seenToolCallIds: new Set(),
+        fatalCount: session.fatalCount ?? 0 }
       this.#sessions.set(sessionId, fresh)
       // A recycled backend resumed the native session, so the restore guard
       // applies again: rebuild the descriptor supply for the next send.
@@ -320,6 +346,23 @@ export class ZcodeCodegAgent {
     } catch {
       return false
     }
+  }
+
+  /** Escalation policy for native frame rejections. Recovery means: fresh
+   * backend process, resume the SAME native session id, verify with a read -
+   * the same recycle the cancel path uses. It is attempted exactly once;
+   * a session that rejects again after a structurally successful recovery is
+   * permanently fatal and later prompts fail fast without touching a backend.
+   * If the native session cannot even be resumed, that is backend-side
+   * damage the adapter cannot repair, and the error says so plainly. */
+  async #handleSessionFatal(sessionId, session) {
+    session.fatalCount = (session.fatalCount ?? 0) + 1
+    if (session.fatalCount === 1) {
+      const recycled = await this.#recycle(sessionId, session).catch(() => false)
+      if (recycled) return sessionFatalError(SESSION_FATAL_RECOVERED)
+    }
+    session.fatal = true
+    return sessionFatalError(SESSION_FATAL_PERMANENT)
   }
 
   /** With an adapter config, capture the descriptor supplier for resumed

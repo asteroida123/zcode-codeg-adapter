@@ -149,6 +149,21 @@ test('Backend: send rejection cannot be disguised as success', async t => {
   const id = await client.open(cwd)
   await assert.rejects(client.prompt(id, 'hi'), code('E_REMOTE'))
 })
+test('Backend: a native frame send rejection is session-fatal, not a generic remote error', async t => {
+  // Field regression (2026-09-26): "Internal error: E_FRAME" once bricked the
+  // session while every later prompt relayed the same raw rejection.
+  const { client, cwd } = await fixture(t, 'frame-brick', true)
+  const id = await client.open(cwd)
+  await assert.rejects(client.prompt(id, 'hi'), error => {
+    assert.equal(error.code, 'E_SESSION_FATAL')
+    assert.equal(error.rpcCode, -32603)
+    assert.deepEqual(error.details.remoteHints, ['native-frame'])
+    assert.ok(!JSON.stringify(error).includes('SYNTHETIC-SECRET'))
+    return true
+  })
+  // The poisoned transport closes; this layer never replays prompts over it.
+  await assert.rejects(client.prompt(id, 'again'), code('E_CLOSED'))
+})
 test('Backend: permission denial has a tested negative filesystem effect', async t => {
   const { client, cwd } = await fixture(t, '', true)
   const id = await client.open(cwd, { mode: 'build' })
@@ -348,6 +363,17 @@ test('Diagnostics: categories never retain message, cause, paths, tokens or arbi
     assert.ok(!JSON.stringify(error).includes('SECRET'))
     assert.ok(!JSON.stringify(error).includes('/private'))
     assert.equal(error.cause, undefined)
+    return true
+  })
+})
+
+test('Diagnostics: native frame rejections classify as native-frame without copying text', async t => {
+  const { client } = await fixture(t)
+  await assert.rejects(client.request('test/error-details', { error: { code: -32603,
+    message: 'Internal error: E_FRAME sk-SYNTHETIC-SECRET /private/path' } }), error => {
+    assert.deepEqual(diagnostic(error), { code: 'E_REMOTE', rpcCode: -32603,
+      remoteMessagePresent: true, remoteHints: ['native-frame'] })
+    assert.ok(!JSON.stringify(error).includes('SYNTHETIC-SECRET'))
     return true
   })
 })

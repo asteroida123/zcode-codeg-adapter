@@ -286,6 +286,43 @@ test('ACP: a native permission re-send storm surfaces as one client question', a
   await assert.rejects(access(join(cwd, 'deny-sentinel.txt')), { code: 'ENOENT' })
 })
 
+test('ACP: a transient native frame error recycles the session and the retry completes', async t => {
+  // Process-local frame damage: the first send is rejected with the native
+  // frame error; a recycled backend that resumes the same session works.
+  const { request, cwd } = await start(t, { fault: 'frame-transient' })
+  const created = await request('session/new', { cwd, mcpServers: [] })
+  const sessionId = created.result.sessionId
+  const prompt = () => request('session/prompt', {
+    sessionId, prompt: [{ type: 'text', text: 'Reply with exactly ZCODE_PROBE_abcdef. Do not use tools or access files.' }],
+  })
+  const first = await prompt()
+  assert.match(JSON.stringify(first.error ?? {}), /E_SESSION_FATAL/)
+  assert.match(JSON.stringify(first.error ?? {}), /recycled and the native session resumed/)
+  const retried = await prompt()
+  assert.equal(retried.error, undefined, JSON.stringify(retried).slice(0, 300))
+  assert.equal(retried.result?.stopReason, 'end_turn')
+})
+
+test('ACP: a persistent native frame error fails fast with stable recovery guidance', async t => {
+  // Store-level frame damage: even a recycled backend that resumes the
+  // session keeps rejecting sends. One recovery attempt, then every later
+  // prompt must fail fast with the SAME actionable error instead of relaying
+  // the raw backend rejection each time.
+  const { request, cwd } = await start(t, { fault: 'frame-brick' })
+  const created = await request('session/new', { cwd, mcpServers: [] })
+  const sessionId = created.result.sessionId
+  const prompt = () => request('session/prompt', {
+    sessionId, prompt: [{ type: 'text', text: 'Reply with exactly ZCODE_PROBE_abcdef. Do not use tools or access files.' }],
+  })
+  const first = await prompt()
+  assert.match(JSON.stringify(first.error ?? {}), /E_SESSION_FATAL/)
+  const second = await prompt()
+  const third = await prompt()
+  assert.match(JSON.stringify(second.error ?? {}), /close this session and create a new one/)
+  assert.equal(JSON.stringify(third.error), JSON.stringify(second.error),
+    'prompts after the permanent verdict fail fast with one stable error')
+})
+
 test('ACP: native permission kinds outside the ACP enum are mapped, not passed through', async t => {
   const { request, cwd } = await start(t)
   const created = await request('session/new', { cwd, mcpServers: [] })

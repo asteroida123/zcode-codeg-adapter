@@ -10,6 +10,7 @@ let sessions = {}
 try { sessions = JSON.parse(fs.readFileSync(storage, 'utf8')) } catch {}
 const active = new Map()
 const backwards = new Map()
+const resumedHere = new Set() // frame-transient: corruption heals on in-process resume
 let heldAck
 const heldResponses = []
 let reverseId = 1 // Deliberately collides with the client's first request ID.
@@ -103,6 +104,7 @@ async function handle(frame) {
   if (method === 'session/resume') {
     const s = sessions[params.sessionId]
     if (!s) { error(id, -32004); return }
+    resumedHere.add(params.sessionId)
     reply(id, { session: { sessionId: fault === 'wrong-resume' ? 'wrong' : params.sessionId,
       workspace: { workspacePath: s.cwd, workspaceKey: s.cwd } } }); return
   }
@@ -196,6 +198,16 @@ async function handle(frame) {
     return
   }
   if (method !== 'session/send') { error(id); return }
+  // Native frame rejection (2026-09-26 field report): the session answers
+  // "Internal error: E_FRAME" and every later send is rejected the same way
+  // in milliseconds. frame-transient models process-local damage that a fresh
+  // process + resume heals; frame-brick persists across processes.
+  if (fault === 'frame-brick' || sessions[params.sessionId].bricked ||
+      (fault === 'frame-transient' && !resumedHere.has(params.sessionId))) {
+    if (fault === 'frame-brick') { sessions[params.sessionId].bricked = true; persist() }
+    send({ id, error: { code: -32603, message: 'Internal error: E_FRAME' } })
+    return
+  }
   if (active.has(params.sessionId)) { error(id, -32010); return }
   const sid = params.sessionId
   const turnId = `turn_${randomUUID()}`

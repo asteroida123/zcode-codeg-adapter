@@ -33,6 +33,9 @@ const cases = [
   { name: 'permission re-send dedupe', file: 'src/backend/backend.mjs', pattern: 'Backend: re-sent permission requests',
     before: '        this.metrics.permissionsDeduped++\n        return entry.response',
     after: '        this.metrics.permissionsDeduped++\n        return null' },
+  { name: 'native frame classification', file: 'src/backend/backend.mjs', pattern: 'Backend: a native frame send rejection',
+    before: "error.details.remoteHints.includes('native-frame')",
+    after: "error.details.remoteHints.includes('request-schema')" },
 ]
 for (const mutation of cases) {
   const dir = await mkdtemp(join(tmpdir(), 'zcode-mutation-'))
