@@ -53,7 +53,7 @@ const INIT_REQUEST = {
 /** One adapter process per test. Frames are plain NDJSON JSON-RPC; the ACP
  * session id equals the native session id, which the synthetic CLI accepts.
  */
-async function start(t, { fault = '', config = null, cli = fake, permission = 'deny' } = {}) {
+async function start(t, { fault = '', config = null, cli = fake, permission = 'deny', initParams = INIT_REQUEST.params } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'zcode-acp-test-'))
   const env = {
     ...process.env, ZCODE_CODEG_ENTRY: cli, FAKE_ZCODE_FAULT: fault, TMPDIR: undefined,
@@ -109,7 +109,7 @@ async function start(t, { fault = '', config = null, cli = fake, permission = 'd
   const notification = (method, params) => {
     child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n')
   }
-  const init = await request('initialize', INIT_REQUEST.params)
+  const init = await request('initialize', initParams)
   t.after(async () => {
     killTree(child)
     await rmTolerant(cwd)
@@ -378,6 +378,39 @@ test('ACP: the mode and model selectors are advertised and applied natively', as
     sessionId: created.result.sessionId, configId: 'mode', value: 'yolo',
   })
   assert.ok(modeRejected.error, 'an off-menu mode value must be rejected')
+})
+
+test('ACP: connect-time preferred mode is applied when the session is created', async t => {
+  // Field regression (2026-09-26): preferredConfigValues arrives top-level on
+  // initialize (Zed/codeg style); the pinned SDK's schema strips it, so
+  // freshly created sessions stayed on plan and could not call MCP tools.
+  const { request, updates, cwd } = await start(t, {
+    initParams: { protocolVersion: 1, clientCapabilities: {}, preferredConfigValues: { mode: 'build' } },
+  })
+  const created = await request('session/new', { cwd, mcpServers: [] })
+  assert.equal(created.error, undefined, JSON.stringify(created).slice(0, 300))
+  const modeOption = created.result.configOptions?.find(option => option.id === 'mode')
+  assert.equal(modeOption?.currentValue, 'build', 'the preferred mode must be applied at establishment')
+  const modeUpdate = updates.find(update => update.update?.sessionUpdate === 'current_mode_update')
+  assert.equal(modeUpdate?.update?.currentModeId, 'build')
+})
+
+test('ACP: preferred config delivered through initialize _meta also applies', async t => {
+  const { request, cwd } = await start(t, {
+    initParams: { protocolVersion: 1, clientCapabilities: {}, _meta: { preferredConfigValues: { mode: 'build' } } },
+  })
+  const created = await request('session/new', { cwd, mcpServers: [] })
+  const modeOption = created.result.configOptions?.find(option => option.id === 'mode')
+  assert.equal(modeOption?.currentValue, 'build')
+})
+
+test('ACP: off-menu or absent preferred values keep the honest default', async t => {
+  const { request, cwd } = await start(t, {
+    initParams: { protocolVersion: 1, clientCapabilities: {}, preferredConfigValues: { mode: 'yolo' } },
+  })
+  const created = await request('session/new', { cwd, mcpServers: [] })
+  const modeOption = created.result.configOptions?.find(option => option.id === 'mode')
+  assert.equal(modeOption?.currentValue, 'plan', 'an off-menu preference is ignored, not guessed onto the wire')
 })
 
 test('ACP: session list mirrors the native store', async t => {

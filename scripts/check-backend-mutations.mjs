@@ -36,6 +36,10 @@ const cases = [
   { name: 'native frame classification', file: 'src/backend/backend.mjs', pattern: 'Backend: a native frame send rejection',
     before: "error.details.remoteHints.includes('native-frame')",
     after: "error.details.remoteHints.includes('request-schema')" },
+  { name: 'preferred-config capture', file: 'src/acp/preferred-config.mjs', testFile: 'test/preferred-config.test.js',
+    pattern: 'preferred-config: the initialize wire field is captured',
+    before: 'if (preferences) store.preferredConfigValues = preferences',
+    after: 'void preferences' },
 ]
 for (const mutation of cases) {
   const dir = await mkdtemp(join(tmpdir(), 'zcode-mutation-'))

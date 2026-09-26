@@ -1,5 +1,6 @@
 import { AppServerBackend } from '../backend/backend.mjs'
 import { buildRuntimeModel } from '../config/adapter-config.mjs'
+import { sanitizePreferredConfigValues, preferredConfigSniffer } from './preferred-config.mjs'
 import { AgentSideConnection, ndJsonStream, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { Readable, Writable } from 'node:stream'
 import { tmpdir } from 'node:os'
@@ -68,14 +69,22 @@ function toolKindFor(toolName) {
  * verified; there is no fs delegation (ZCode reads and writes files itself).
  */
 export class ZcodeCodegAgent {
-  constructor(conn, { backendFactory, config = null, cancelTimeoutMs = STOP_CANCEL_TIMEOUT_MS } = {}) {
+  constructor(conn, { backendFactory, config = null, cancelTimeoutMs = STOP_CANCEL_TIMEOUT_MS, preferences = null } = {}) {
     this.#conn = conn
     this.#backendFactory = backendFactory
     this.#config = config
     this.#cancelTimeoutMs = cancelTimeoutMs
+    // Shared store the stdio sniffer fills from the raw initialize frame.
+    this.#preferences = preferences
   }
 
   async initialize(params) {
+    // preferredConfigValues reaches the agent only through _meta (the SDK's
+    // initialize schema strips unknown top-level fields); the top-level wire
+    // variant is captured by the stdin sniffer instead. Both merge at use
+    // time in #preferredMode, with the sniffed wire value winning.
+    const meta = sanitizePreferredConfigValues(params?._meta?.preferredConfigValues)
+    if (meta) this.#preferredMeta = meta
     const requested = Number(params?.protocolVersion)
     return {
       protocolVersion: requested === PROTOCOL_VERSION ? requested : PROTOCOL_VERSION,
@@ -140,12 +149,42 @@ export class ZcodeCodegAgent {
     return options
   }
 
+  /** The connect-time preferred mode, when the client named one of the
+   * advertised modes (the ZCode plan/build enum surfaced as the `mode`
+   * configOption). Off-menu values are ignored, not guessed onto the wire. */
+  #preferredMode() {
+    const values = { ...(this.#preferredMeta ?? {}), ...(this.#preferences?.preferredConfigValues ?? {}) }
+    return AGENT_MODES.some(entry => entry.id === values.mode) ? values.mode : null
+  }
+
   async newSession(params) {
+    const preferredMode = this.#preferredMode()
     const backend = this.#backendFactory(params.cwd, this.#conn)
-    const sessionId = await backend.open(params.cwd, { mode: 'plan', mcpServers: params.mcpServers ?? [] })
+    const sessionId = await backend.open(params.cwd, { mode: preferredMode ?? 'plan', mcpServers: params.mcpServers ?? [] })
     const session = { backend, sessionId, cwd: params.cwd, seenToolCallIds: new Set() }
     this.#sessions.set(sessionId, session)
+    if (preferredMode !== null) await this.#applyMode(session, sessionId, preferredMode)
     return { sessionId, ...(await this.#sessionOptions(session)) }
+  }
+
+  /** Apply the connect-time preferred mode on the session-establishment
+   * path. create/resume alone does not reliably move a 0.16.5 session off
+   * plan, so the verified verb (session/setMode - the same call
+   * session/set_config_option makes mid-session) is issued once immediately
+   * after the session exists. A native refusal degrades honestly: the
+   * advertised configOption currentValue then reports whatever the session
+   * actually runs, never a fabricated mode. Not applied on session/load: a
+   * resumed session keeps the mode it was persisted with. */
+  async #applyMode(session, sessionId, mode) {
+    try {
+      const { mode: applied } = await session.backend.setMode(sessionId, mode)
+      await this.#conn.sessionUpdate({
+        sessionId,
+        update: { sessionUpdate: 'current_mode_update', currentModeId: applied },
+      }).catch(() => {})
+    } catch {
+      // No fabricated mode; the selector's currentValue shows reality.
+    }
   }
 
   async loadSession(params) {
@@ -395,6 +434,8 @@ export class ZcodeCodegAgent {
   #backendFactory
   #config
   #cancelTimeoutMs
+  #preferences
+  #preferredMeta = null
   #sessions = new Map()
 }
 
@@ -447,6 +488,11 @@ export function permissionDelegator(conn, acpSessionId) {
  * configuration (or null for relay-only mode).
  */
 export function serveOverStdio({ command, entry, env, config = null }) {
+  // Connect-time client preferences (preferredConfigValues on initialize)
+  // are stripped by the pinned SDK's schema, so they are captured passively
+  // from the raw stdin frames before the SDK parses them. The sniffer
+  // forwards every byte unchanged.
+  const preferences = {}
   const toAgent = conn => new ZcodeCodegAgent(conn, {
     backendFactory: (cwd, agentConn) => new AppServerBackend({
       command, args: [entry, 'app-server', '--stdio'], cwd, env,
@@ -454,7 +500,9 @@ export function serveOverStdio({ command, entry, env, config = null }) {
       onPermission: nativeRequest => permissionDelegator(agentConn, nativeRequest.sessionId)(nativeRequest),
     }),
     config,
+    preferences,
   })
-  const stream = ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin))
+  const stream = ndJsonStream(Writable.toWeb(process.stdout),
+    Readable.toWeb(process.stdin).pipeThrough(preferredConfigSniffer(preferences)))
   return new AgentSideConnection(toAgent, stream)
 }

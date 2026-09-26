@@ -190,6 +190,40 @@ codeg-mcp 工具集，ZCode→codex 委托端到端可通；实测暴露三个"Z
      `frame-brick`（持久砖化）；分别钉住"恢复后重试成功"与"三次 prompt 的
      错误语义：第一条含恢复结果、第二/三条为同一稳定错误"。mutation：
      native-frame 分类改判 request-schema 必须红。
+3. **connect 时 preferredConfigValues 的 mode 不生效**（新增 `src/acp/preferred-config.mjs`、`src/acp/server.mjs`）
+   - 根因：Zed/codeg 风格客户端在 initialize **顶层**发
+     `preferredConfigValues:{"mode":"build"}`，而锁定 SDK 1.4.0 的 initialize
+     zod schema 剥离未知顶层字段，值到不了 `initialize()` handler；
+     `newSession` 又硬编码 `mode:'plan'`——plan 模式调不了 MCP 工具，委托链
+     被卡在计划流程。
+   - 修复：stdin 上加**被动** TransformStream 嗅探（字节原样转发、仅旁路解
+     析 initialize 帧提取该字段；256KB 扫描预算、sanitize 只收基本类型、
+     16 键/256 字符上限）；同时接受 `_meta.preferredConfigValues`（schema 保
+     留 `_meta`，顶层线上值优先）。`newSession` 以 preferred mode 调 create，
+     并立即补发一次已验证动词 `session/setMode`（等价于建立时即做一次
+     acp_set_config_option(mode)）+ `current_mode_update` 通知。off-menu 值
+     （如 yolo）忽略不猜；`session/load` 不应用（保留会话持久化 mode）；
+     原生拒绝 setMode 时诚实降级，configOption currentValue 如实显示。
+   - 回归：新增 `test/preferred-config.test.js`（字节级转发不变形、分块边
+     界、噪声/伪造帧、预算放弃、sanitize 边界，8 项）+ acp-server 3 项（顶
+     层生效含 current_mode_update、_meta 生效、off-menu 保持 plan）。注：
+     plan/build/edit/yolo 是 ZCode 模式枚举，本修复只应用已向客户端广告
+     的 plan/build；edit/yolo 的广告面仍按 PROTOCOL-CALIBRATION 后续项处理。
+
+测试证据（合成，本机 macOS arm64，本轮复跑 Node 22.23.1）：`npm run check` 通
+过；`npm test` 235 项全过（新增 19：backend-contract 5（含跨窗口重问）、
+acp-server 6 中新增 3 项 preferred + 2 项 frame + 1 项风暴、preferred-config
+8；另 harness initParams 参数化）；`npm run test:mutations` 10/10 检出（新增
+3：权限去重、native-frame 分类、嗅探捕获）；`npm run probe:backend`
+synthetic/pass。未运行真实 ZCode 复测。
+
+残留（需 ZCode 后端或后续配合）：
+- 权限未应答为何演化为会话级 E_FRAME——根因在后端的重发/超时策略，adapter
+  只能止血（去重）+ 砖化后清晰失败；
+- 会话级致命错误无后端恢复动词（无 rebuild/health-probe），恢复上限即本修
+  复的 recycle+resume+read；
+- 0.16.5 发布版 create 不装配 `params.mcpServers`（见 PROTOCOL-CALIBRATION），
+  MCP 工具面完整依赖新版后端，与本轮三项修复正交。
 
 
 
