@@ -390,7 +390,7 @@ test('ACP: the mode and model selectors are advertised and applied natively', as
   assert.equal(created.result.modes, undefined)
   const modeOption = created.result.configOptions?.find(option => option.id === 'mode')
   assert.equal(modeOption?.type, 'select')
-  assert.equal(modeOption.currentValue, 'plan')
+  assert.equal(modeOption.currentValue, 'build')
   // ZCode's own four switchable modes, with the names its picker shows.
   assert.deepEqual(modeOption.options, [
     { value: 'plan', name: 'Plan mode' },
@@ -508,7 +508,7 @@ test('ACP: a connect-time preferred mode is honoured only when ZCode offers it',
     })
     const created = await off.request('session/new', { cwd: off.cwd, mcpServers: [] })
     const modeOption = created.result.configOptions?.find(option => option.id === 'mode')
-    assert.equal(modeOption?.currentValue, 'plan', `${offMenu}: an off-menu preference must be ignored`)
+    assert.equal(modeOption?.currentValue, 'build', `${offMenu}: an off-menu preference must be ignored`)
   }
 })
 

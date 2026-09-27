@@ -33,7 +33,7 @@ resume 路径补传 `mcpServers`（协议 schema 明确接受）、会话建立�
 | `session/event` 信封 | discriminatedUnion：turn.started/completed/failed、part.delta（field: text/reasoning/input/output）、tool.updated、permission.requested/resolved、userInput.requested/resolved、checkpoint.created 等 | ✅ |
 | tool.updated 生命周期 | `scheduled → started → progress → result|error`，另有 batch/raw 聚合；scheduled 携带 toolName/input | ✅ |
 | 权限选项 kind 为自由字符串 | `zcodePermissionOptionSchema.kind: nonEmptyString`——闭枚举是 ACP 侧约束；真机原生发出 `deny` 等非标 kind | ✅ 适配器映射层位置正确 |
-| 模式枚举 | legacy: `plan/build/edit/yolo/auto`；v4 值域刻意排除 auto（源码注释）。真机实测：`session/setMode` 对 build/edit/yolo/auto 生效、对 `bogus` 报 E_REMOTE；**`plan` 被接受却不生效**（读回 build）——plan 是 workspace 交互偏好 `planEnabled`，由 agent 自己的 `EnterPlanMode`/`ExitPlanMode` 工具翻转（桌面 bundle 实证），客户端无法经 wire 强制进入。适配器已对齐 ZCode 的四个可切换模式（含其官方文案：Plan mode / Ask before changes / Edit automatically / Full access） | ✅ 已对齐（plan 的 wire 限制见备注） |
+| 模式枚举 | legacy: `plan/build/edit/yolo/auto`；v4 值域刻意排除 auto（源码注释）。真机实测：`session/setMode` 对 build/edit/yolo/auto 生效、对 `bogus` 报 E_REMOTE；**`plan` 被接受却不生效**（读回 build）——plan 是 workspace 交互偏好 `planEnabled`，由 agent 自己的 `EnterPlanMode`/`ExitPlanMode` 工具翻转（桌面 bundle 实证），客户端无法经 wire 强制进入。适配器已对齐 ZCode 的四个可切换模式（含其官方文案：Plan mode / Ask before changes / Edit automatically / Full access）。**新建会话的默认模式改为 `build`**（ZCode 自己的默认）：以 `plan` 建会话会点亮 plan 标记，而 plan 的工作流强制每个回合以提问结束，原生提问又需要客户端作答——客户端没有这条通道时模型只能改口用纯文本重说一遍（现场表现为一次「你好」出现两段回答）。真机 A/B：默认 build 的新会话 1 个模型回合、无任何 plan 标记；旧的 plan 会话 2 个回合、系统提示/思维里带 `plan mode is active` + `ExitPlanMode` | ✅ 已对齐（plan 的 wire 限制见备注） |
 | 思考等级 | `session/read` 的 `settings.thoughtLevel = {available:[{value,label}], current, enabled}` 是会话级权威档位表；`session/setThoughtLevel {sessionId, thoughtLevel}` 生效（实测 low/high/max 可切、模型不支持的档位报 E_REMOTE）。适配器据此广告 `reasoning_effort` 选择器并路由到该方法 | ✅ 已实现 |
 | 模型展示名契约 | ACP 客户端（codeg）从 model 选项**显示名的第一段 `/`** 推导选择器分组标题并把它从行里剥掉；适配器因此把行标签拼成 `Provider / Model`（`providerId/modelId` 仍是 value，契约不变） | ✅ 已实现 |
 | 状态枚举 | `idle/running/waiting/paused/...`——`waiting`（等用户）存在，适配器尚未区分 | 📝 待跟进 |
@@ -65,6 +65,8 @@ resume 路径补传 `mcpServers`（协议 schema 明确接受）、会话建立�
    适配器经 `interaction/requestPermission` 转发；codeg 目前只给自己的 MCP
    `ask_user_question` 提供提问 UI，原生提问会走成权限拒绝——模型随后改用纯文本
    重述问题（现场观测：一次「你好」出现两段问候）。要么 codeg 渲染原生提问，要么
-   适配器侧开启 `askUserQuestionAutoResolutionEnabled` 让 ZCode 自答（语义待定）。
+   适配器侧开启 `askUserQuestionAutoResolutionEnabled` 让 ZCode 自答（语义待定——桌面端保持 false，
+   即把选择权留给用户）。**主要触发源已被上表的默认模式改动消除**：只有客户端显式把会话设为 plan
+   （或未来后端允许客户端切 plan）时才会再遇到；届时按上面两条路之一补客户端回答面。
 5. **`waiting` 状态**：会话等用户时 projection.status=waiting，适配器可
    向 ACP 侧表达 blocked-on-user（当前仅委托链路有 blocked_on）。

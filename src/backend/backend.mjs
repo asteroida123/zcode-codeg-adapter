@@ -93,7 +93,12 @@ export class AppServerBackend {
     })
   }
 
-  async open(cwd, { sessionId, mode = 'plan', mcpServers = [] } = {}) {
+  async open(cwd, { sessionId, mode = 'build', mcpServers = [] } = {}) {
+    // `build` is ZCode's own default: creating a session in `plan` engages the
+    // plan flag, whose workflow forces every turn to end in a question, and the
+    // native question tool needs a client answer path ACP clients do not have
+    // (the model then falls back to plain text, which reads as a duplicated
+    // answer). A client that wants plan asks for it explicitly per session.
     if (!ZCODE_MODE_IDS.includes(mode)) throw new ProbeError('E_MODE')
     const canonical = await realpath(cwd)
     const workspace = { workspacePath: canonical, workspaceKey: canonical }

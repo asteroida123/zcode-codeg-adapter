@@ -111,7 +111,7 @@ async function handle(frame) {
   if (method === 'session/list') {
     reply(id, { sessions: Object.entries(sessions).map(([sid, s]) => ({
       sessionId: sid, workspace: { workspacePath: s.cwd, workspaceKey: s.cwd },
-      title: 'Synthetic session', sessionKind: 'interactive', mode: s.mode ?? 'plan',
+      title: 'Synthetic session', sessionKind: 'interactive', mode: s.mode ?? 'build',
       status: 'idle', createdAt: 1, updatedAt: 2, archivedAt: null,
     })) })
     return
@@ -164,7 +164,7 @@ async function handle(frame) {
             { ref: { providerId: 'builtin-x', modelId: 'fake-mini' }, label: 'Fake Mini', providerLabel: 'Fake Provider' },
           ],
         },
-        mode: { current: sessions[params.sessionId].mode ?? 'plan' },
+        mode: { current: sessions[params.sessionId].mode ?? 'build' },
         thoughtLevel: {
           enabled: true,
           current: sessions[params.sessionId].thoughtLevel ?? 'high',

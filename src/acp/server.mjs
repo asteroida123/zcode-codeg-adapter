@@ -189,7 +189,7 @@ export class ZcodeCodegAgent {
   async newSession(params) {
     const preferredMode = this.#preferredMode()
     const backend = this.#backendFactory(params.cwd, this.#conn)
-    const sessionId = await backend.open(params.cwd, { mode: preferredMode ?? 'plan', mcpServers: params.mcpServers ?? [] })
+    const sessionId = await backend.open(params.cwd, { mode: preferredMode ?? 'build', mcpServers: params.mcpServers ?? [] })
     const session = { backend, sessionId, cwd: params.cwd, seenToolCallIds: new Set() }
     this.#sessions.set(sessionId, session)
     if (preferredMode !== null) await this.#applyMode(session, sessionId, preferredMode)
