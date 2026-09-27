@@ -17,7 +17,7 @@ Codeg ── ACP / stdio ── zcode-codeg-acp（本仓库：会话协调/事�
 
 ## 架构
 
-生产入口 `zcode-codeg-acp`（`bin/zcode-codeg-acp.js`）实现完整 ACP 服务端（`src/acp/server.mjs`）：初始化/能力声明、新会话/加载、流式提示、工具调用镜像、权限转接（客户端决策，默认拒绝）、取消、模型/模式选择器。原生侧（`src/backend/`）经私有 NDJSON 驱动 ZCode app-server，回合关联与取消契约有版本化证据（`docs/TURN-EVIDENCE.md`、`docs/CANCELLATION.md`）。
+生产入口 `zcode-codeg-acp`（`bin/zcode-codeg-acp.js`）实现完整 ACP 服务端（`src/acp/server.mjs`）：初始化/能力声明、新会话/加载、流式提示、工具调用镜像、权限转接（客户端决策，默认拒绝）、取消、模型/模式/思考等级选择器。原生侧（`src/backend/`）经私有 NDJSON 驱动 ZCode app-server，回合关联与取消契约有版本化证据（`docs/TURN-EVIDENCE.md`、`docs/CANCELLATION.md`）。
 
 旧入口 `zcode-codeg`（`bin/zcode-codeg.js` + `src/launcher.js`）是历史薄启动封装，仅作对照保留，不再是目标架构。
 

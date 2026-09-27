@@ -175,7 +175,7 @@ test('e2e: the model selector merges the config catalog with the snapshot', asyn
   assert.ok(values.includes('builtin-x/fake-model'))
   assert.ok(!values.includes('custom:off/never'))
   const fromConfig = modelOption.options.find(option => option.value === 'builtin:plan/GLM-5.3')
-  assert.equal(fromConfig.name, 'BigPlan · GLM-5.3')
+  assert.equal(fromConfig.name, 'BigPlan / GLM-5.3')
   // 切到 config 目录里的模型（带 runtimeModel overlay）被接受。
   const switched = await request('session/set_config_option', {
     sessionId: created.sessionId, configId: 'model', value: 'builtin:plan/GLM-5.3',

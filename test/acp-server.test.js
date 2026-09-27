@@ -391,7 +391,13 @@ test('ACP: the mode and model selectors are advertised and applied natively', as
   const modeOption = created.result.configOptions?.find(option => option.id === 'mode')
   assert.equal(modeOption?.type, 'select')
   assert.equal(modeOption.currentValue, 'plan')
-  assert.deepEqual(modeOption.options, [{ value: 'plan', name: 'Plan' }, { value: 'build', name: 'Build' }])
+  // ZCode's own four switchable modes, with the names its picker shows.
+  assert.deepEqual(modeOption.options, [
+    { value: 'plan', name: 'Plan mode' },
+    { value: 'build', name: 'Ask before changes' },
+    { value: 'edit', name: 'Edit automatically' },
+    { value: 'yolo', name: 'Full access' },
+  ])
   const modelOption = created.result.configOptions?.find(option => option.id === 'model')
   assert.equal(modelOption?.type, 'select')
   assert.equal(modelOption.currentValue, 'builtin-x/fake-model')
@@ -413,10 +419,40 @@ test('ACP: the mode and model selectors are advertised and applied natively', as
   })
   const modeAfter = modeSwitched.result?.configOptions?.find(option => option.id === 'mode')
   assert.equal(modeAfter?.currentValue, 'plan')
-  const modeRejected = await request('session/set_config_option', {
+  // `yolo` is on ZCode's menu and must now be selectable…
+  const modeYolo = await request('session/set_config_option', {
     sessionId: created.result.sessionId, configId: 'mode', value: 'yolo',
   })
-  assert.ok(modeRejected.error, 'an off-menu mode value must be rejected')
+  assert.equal(modeYolo.error, undefined, JSON.stringify(modeYolo).slice(0, 200))
+  // …while a value outside the four (legacy `auto`, or noise) stays rejected.
+  for (const offMenu of ['auto', 'bogus']) {
+    const modeRejected = await request('session/set_config_option', {
+      sessionId: created.result.sessionId, configId: 'mode', value: offMenu,
+    })
+    assert.ok(modeRejected.error, `${offMenu} must be rejected`)
+  }
+})
+
+test('ACP: the reasoning-effort selector mirrors the native thought levels', async t => {
+  const { request, cwd } = await start(t)
+  const created = await request('session/new', { cwd, mcpServers: [] })
+  const levelOption = created.result.configOptions?.find(option => option.id === 'reasoning_effort')
+  assert.equal(levelOption?.type, 'select')
+  assert.equal(levelOption.currentValue, 'high')
+  assert.deepEqual(levelOption.options.map(option => option.value), ['low', 'high', 'max'])
+  const switched = await request('session/set_config_option', {
+    sessionId: created.result.sessionId, configId: 'reasoning_effort', value: 'max',
+  })
+  assert.equal(switched.error, undefined, JSON.stringify(switched).slice(0, 200))
+  const after = switched.result?.configOptions?.find(option => option.id === 'reasoning_effort')
+  assert.equal(after?.currentValue, 'max')
+  const rejected = await request('session/set_config_option', {
+    sessionId: created.result.sessionId, configId: 'reasoning_effort', value: 'medium',
+  })
+  assert.ok(rejected.error, 'a level the current model does not offer must be rejected')
+  // The mode selector is unaffected by the new option.
+  const modeOption = switched.result?.configOptions?.find(option => option.id === 'mode')
+  assert.equal(modeOption?.options.length, 4)
 })
 
 test('ACP: connect-time preferred mode is applied when the session is created', async t => {
@@ -443,13 +479,24 @@ test('ACP: preferred config delivered through initialize _meta also applies', as
   assert.equal(modeOption?.currentValue, 'build')
 })
 
-test('ACP: off-menu or absent preferred values keep the honest default', async t => {
-  const { request, cwd } = await start(t, {
+test('ACP: a connect-time preferred mode is honoured only when ZCode offers it', async t => {
+  // On-menu: the preference is applied and reported back.
+  const onMenu = await start(t, {
     initParams: { protocolVersion: 1, clientCapabilities: {}, preferredConfigValues: { mode: 'yolo' } },
   })
-  const created = await request('session/new', { cwd, mcpServers: [] })
-  const modeOption = created.result.configOptions?.find(option => option.id === 'mode')
-  assert.equal(modeOption?.currentValue, 'plan', 'an off-menu preference is ignored, not guessed onto the wire')
+  const applied = await onMenu.request('session/new', { cwd: onMenu.cwd, mcpServers: [] })
+  const appliedOption = applied.result.configOptions?.find(option => option.id === 'mode')
+  assert.equal(appliedOption?.currentValue, 'yolo')
+
+  // Off-menu (the legacy `auto`, or noise): ignored, never guessed onto the wire.
+  for (const offMenu of ['auto', 'bogus']) {
+    const off = await start(t, {
+      initParams: { protocolVersion: 1, clientCapabilities: {}, preferredConfigValues: { mode: offMenu } },
+    })
+    const created = await off.request('session/new', { cwd: off.cwd, mcpServers: [] })
+    const modeOption = created.result.configOptions?.find(option => option.id === 'mode')
+    assert.equal(modeOption?.currentValue, 'plan', `${offMenu}: an off-menu preference must be ignored`)
+  }
 })
 
 test('ACP: session list mirrors the native store', async t => {

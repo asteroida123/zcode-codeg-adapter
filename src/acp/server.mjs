@@ -1,5 +1,6 @@
 import { AppServerBackend } from '../backend/backend.mjs'
 import { buildRuntimeModel } from '../config/adapter-config.mjs'
+import { ZCODE_MODES } from '../backend/modes.mjs'
 import { sanitizePreferredConfigValues, preferredConfigSniffer } from './preferred-config.mjs'
 import { AgentSideConnection, ndJsonStream, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { Readable, Writable } from 'node:stream'
@@ -10,7 +11,11 @@ const idValue = value => typeof value === 'string' && value.length > 0 && value.
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const DEFAULT_PROMPT_TIMEOUT_MS = 600000
 const STOP_CANCEL_TIMEOUT_MS = 15000
-const AGENT_MODES = [{ id: 'plan', name: 'Plan' }, { id: 'build', name: 'Build' }]
+const AGENT_MODES = ZCODE_MODES
+// codeg's id for a reasoning-level selector (the same id its delegation
+// capability catalog reads, and the one qoder publishes) — so the level shows
+// up in the composer's option list without any client-side special-casing.
+const REASONING_EFFORT_OPTION_ID = 'reasoning_effort'
 // Native tool.updated lifecycle -> ACP tool_call status. batch/raw payloads
 // aggregate other calls and are not mirrored in v1.
 const TOOL_STATUS = {
@@ -134,12 +139,33 @@ export class ZcodeCodegAgent {
       // No fabricated model options.
     }
     try {
+      const level = await session.backend.thoughtLevel(session.sessionId)
+      const available = Array.isArray(level?.available) ? level.available : []
+      if (level?.enabled !== false && available.length > 0) {
+        const values = new Set(available.map(entry => entry.value))
+        const current = idValue(level.current) && values.has(level.current) ? level.current : available[0].value
+        options.configOptions = [
+          ...(options.configOptions ?? []),
+          {
+            id: REASONING_EFFORT_OPTION_ID, type: 'select', name: 'Reasoning effort',
+            currentValue: current,
+            options: available.map(entry => ({
+              value: entry.value,
+              name: idValue(entry.label) ? entry.label : entry.value,
+            })),
+          },
+        ]
+      }
+    } catch {
+      // No fabricated reasoning option.
+    }
+    try {
       const currentMode = await session.backend.currentMode(session.sessionId)
       options.configOptions = [
         ...(options.configOptions ?? []),
         {
           id: 'mode', type: 'select', name: 'Mode',
-          currentValue: currentMode ?? 'plan',
+          currentValue: currentMode ?? 'build',
           options: AGENT_MODES.map(mode => ({ value: mode.id, name: mode.name })),
         },
       ]
@@ -235,6 +261,14 @@ export class ZcodeCodegAgent {
         sessionId: params.sessionId,
         update: { sessionUpdate: 'current_mode_update', currentModeId: applied.mode },
       }).catch(() => {})
+      return this.#sessionOptions(session)
+    }
+    if (params.configId === REASONING_EFFORT_OPTION_ID) {
+      const level = String(params.value)
+      const available = await session.backend.thoughtLevel(params.sessionId)
+      const values = new Set((Array.isArray(available?.available) ? available.available : []).map(entry => entry.value))
+      if (!values.has(level)) throw new Error('unknown reasoning level')
+      await session.backend.setThoughtLevel(params.sessionId, level)
       return this.#sessionOptions(session)
     }
     if (params.configId !== 'model') throw new Error('unknown config option')

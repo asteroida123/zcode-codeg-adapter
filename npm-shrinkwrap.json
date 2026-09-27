@@ -1,12 +1,12 @@
 {
   "name": "zcode-codeg-adapter",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
       "name": "@asteroida123/zcode-codeg-adapter",
-      "version": "0.1.0",
+      "version": "0.1.6",
       "license": "MIT",
       "dependencies": {
         "@agentclientprotocol/sdk": "1.4.0",

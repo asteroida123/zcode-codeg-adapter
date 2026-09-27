@@ -1,6 +1,7 @@
 import { realpath } from 'node:fs/promises'
 import { PrivateRpc } from './rpc.mjs'
 import { ProbeError, object } from './errors.mjs'
+import { ZCODE_MODE_IDS } from './modes.mjs'
 import { identityShape, turnIdentity } from './turn-evidence.mjs'
 import { modelReferenceFromSnapshot, modelRuntimeFromSnapshot, rebindOriginalModel } from './resume-model.mjs'
 import {
@@ -93,7 +94,7 @@ export class AppServerBackend {
   }
 
   async open(cwd, { sessionId, mode = 'plan', mcpServers = [] } = {}) {
-    if (!['plan', 'build'].includes(mode)) throw new ProbeError('E_MODE')
+    if (!ZCODE_MODE_IDS.includes(mode)) throw new ProbeError('E_MODE')
     const canonical = await realpath(cwd)
     const workspace = { workspacePath: canonical, workspaceKey: canonical }
     // Both create and resume take mcpServers (the resume schema carries it for
@@ -221,7 +222,10 @@ export class AppServerBackend {
     }
     const cfg = await this.loadZcodeConfig()
     for (const entry of selectableModelCatalog(cfg).slice(0, 128)) {
-      push(entry.providerId, entry.modelId, `${entry.providerName} · ${entry.modelId}`)
+      // `Provider / Model`: the ACP client derives the picker's group header
+      // from the display name's first "/" segment, so the separator is a
+      // display contract, not cosmetics.
+      push(entry.providerId, entry.modelId, `${entry.providerName} / ${entry.modelId}`)
     }
     const available = snapshot?.settings?.model?.available
     if (Array.isArray(available)) {
@@ -289,6 +293,29 @@ export class AppServerBackend {
       throw new ProbeError('E_RESUME_MODEL_CHANGED')
     }
     return { model: reference }
+  }
+
+  /** The session's thought (reasoning) levels as the native snapshot reports
+   * them: `{available: [{value, label}], current, enabled}`. Authoritative and
+   * per model — the snapshot is the same source the desktop picker reads, so
+   * the adapter never has to guess levels from config.json. Null when the
+   * snapshot carries none (callers advertise nothing rather than a fake list). */
+  async thoughtLevel(id) {
+    this.state(id)
+    const snapshot = await this.rpc.request('session/read', { sessionId: id })
+    const level = snapshot?.settings?.thoughtLevel
+    if (!object(level)) return null
+    return level
+  }
+
+  /** Switch the session's thought level (native `session/setThoughtLevel`).
+   * The backend rejects levels the current model does not offer; the caller
+   * validates against [`thoughtLevel`] first so the refusal is readable. */
+  async setThoughtLevel(id, level) {
+    this.state(id)
+    if (!idValue(level)) throw new ProbeError('E_THOUGHT_LEVEL')
+    const result = await this.rpc.request('session/setThoughtLevel', { sessionId: id, thoughtLevel: level })
+    return { thoughtLevel: idValue(result?.settings?.thoughtLevel?.current) ? result.settings.thoughtLevel.current : level }
   }
 
   /** Native session listing for the ACP mirror. Uses the first ready

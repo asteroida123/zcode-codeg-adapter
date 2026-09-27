@@ -33,7 +33,9 @@ resume 路径补传 `mcpServers`（协议 schema 明确接受）、会话建立�
 | `session/event` 信封 | discriminatedUnion：turn.started/completed/failed、part.delta（field: text/reasoning/input/output）、tool.updated、permission.requested/resolved、userInput.requested/resolved、checkpoint.created 等 | ✅ |
 | tool.updated 生命周期 | `scheduled → started → progress → result|error`，另有 batch/raw 聚合；scheduled 携带 toolName/input | ✅ |
 | 权限选项 kind 为自由字符串 | `zcodePermissionOptionSchema.kind: nonEmptyString`——闭枚举是 ACP 侧约束；真机原生发出 `deny` 等非标 kind | ✅ 适配器映射层位置正确 |
-| 模式枚举 | legacy: `plan/build/edit/yolo/auto`；v4 值域刻意排除 auto（源码注释）。适配器当前仅暴露 plan/build | 📝 可扩展 edit/yolo |
+| 模式枚举 | legacy: `plan/build/edit/yolo/auto`；v4 值域刻意排除 auto（源码注释）。真机实测：`session/setMode` 对 build/edit/yolo/auto 生效、对 `bogus` 报 E_REMOTE；**`plan` 被接受却不生效**（读回 build）——plan 是 workspace 交互偏好 `planEnabled`，由 agent 自己的 `EnterPlanMode`/`ExitPlanMode` 工具翻转（桌面 bundle 实证），客户端无法经 wire 强制进入。适配器已对齐 ZCode 的四个可切换模式（含其官方文案：Plan mode / Ask before changes / Edit automatically / Full access） | ✅ 已对齐（plan 的 wire 限制见备注） |
+| 思考等级 | `session/read` 的 `settings.thoughtLevel = {available:[{value,label}], current, enabled}` 是会话级权威档位表；`session/setThoughtLevel {sessionId, thoughtLevel}` 生效（实测 low/high/max 可切、模型不支持的档位报 E_REMOTE）。适配器据此广告 `reasoning_effort` 选择器并路由到该方法 | ✅ 已实现 |
+| 模型展示名契约 | ACP 客户端（codeg）从 model 选项**显示名的第一段 `/`** 推导选择器分组标题并把它从行里剥掉；适配器因此把行标签拼成 `Provider / Model`（`providerId/modelId` 仍是 value，契约不变） | ✅ 已实现 |
 | 状态枚举 | `idle/running/waiting/paused/...`——`waiting`（等用户）存在，适配器尚未区分 | 📝 待跟进 |
 | 反向偏好应答 `askUserQuestionAutoResolutionEnabled:false` | 与 desktop 行为一致；配合 `interaction/requestOfficialMcpAuthHeaders` 等反向面 | ✅ |
 | `session/send` 已收敛 v4 sendText、`session/stop`/`fork`/`cancelBackgroundTask` 标记 @deprecated（wire 兼容保留） | 0.16.5 发布版仍走 legacy wire——适配器用法正确，升级时需关注 v4 命令面 | 📝 跟进项 |
@@ -56,7 +58,13 @@ resume 路径补传 `mcpServers`（协议 schema 明确接受）、会话建立�
    的转换逻辑把 config.json 迁移到协议 provider 格式）。
 2. **MCP 工具面**：新版后端发布后，现有 connect 调用自动生效；届时用
    `mcp/list` 的 toolCount 断言加回归。
-3. **模式面扩展**：向 codeg 暴露 `edit`（半自动）/`yolo`（全自动，等价
-   其他智能体的 bypass 权限模式）；`auto` 遵循 v4 弃用不暴露。
-4. **`waiting` 状态**：会话等用户时 projection.status=waiting，适配器可
+3. ~~**模式面扩展**~~ ✅ 已完成（0.1.6）：向 codeg 暴露 ZCode 的四个可切换模式
+   （`plan`/`build`/`edit`/`yolo`，含官方显示名）；`auto` 遵循 v4 弃用不暴露。
+   `plan` 在 0.16.5 上无法由客户端强制（见上表），选择器如实回报会话实际状态。
+4. **原生 `AskUserQuestion` 的客户端回答面**：ZCode 的原生提问工具需要客户端作答，
+   适配器经 `interaction/requestPermission` 转发；codeg 目前只给自己的 MCP
+   `ask_user_question` 提供提问 UI，原生提问会走成权限拒绝——模型随后改用纯文本
+   重述问题（现场观测：一次「你好」出现两段问候）。要么 codeg 渲染原生提问，要么
+   适配器侧开启 `askUserQuestionAutoResolutionEnabled` 让 ZCode 自答（语义待定）。
+5. **`waiting` 状态**：会话等用户时 projection.status=waiting，适配器可
    向 ACP 侧表达 blocked-on-user（当前仅委托链路有 blocked_on）。

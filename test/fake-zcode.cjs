@@ -165,6 +165,15 @@ async function handle(frame) {
           ],
         },
         mode: { current: sessions[params.sessionId].mode ?? 'plan' },
+        thoughtLevel: {
+          enabled: true,
+          current: sessions[params.sessionId].thoughtLevel ?? 'high',
+          available: [
+            { value: 'low', label: 'low' },
+            { value: 'high', label: 'high' },
+            { value: 'max', label: 'max' },
+          ],
+        },
       },
     })
     return
@@ -172,6 +181,13 @@ async function handle(frame) {
   if (method === 'session/setMode') {
     if (!['plan', 'build', 'edit', 'yolo', 'auto'].includes(params.mode)) { error(id, -32602); return }
     sessions[params.sessionId].mode = params.mode
+    persist()
+    reply(id, {})
+    return
+  }
+  if (method === 'session/setThoughtLevel') {
+    if (!['low', 'high', 'max'].includes(params.thoughtLevel)) { error(id, -32602); return }
+    sessions[params.sessionId].thoughtLevel = params.thoughtLevel
     persist()
     reply(id, {})
     return
