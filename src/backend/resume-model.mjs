@@ -6,10 +6,28 @@ const identifier = value => typeof value === 'string' && value.length > 0 && val
  * This candidate deliberately supports one observed snapshot layout. Missing or
  * changed layouts stop the experiment; they do not select a default model.
  */
+/** The provider's own display name for `ref`, taken from the snapshot's
+ * available list — the one place the native backend names a provider. Null when
+ * the snapshot carries none, so callers degrade instead of inventing a name. */
+function providerLabelFromSnapshot(snapshot, ref) {
+  const available = snapshot?.settings?.model?.available
+  if (!Array.isArray(available)) return null
+  for (const entry of available) {
+    const candidate = object(entry?.ref) ? entry.ref : entry
+    if (!object(candidate)) continue
+    if (candidate.providerId !== ref.providerId || candidate.modelId !== ref.modelId) continue
+    return identifier(entry?.providerLabel) ? entry.providerLabel : null
+  }
+  return null
+}
+
 export function modelReferenceFromSnapshot(snapshot) {
   const ref = snapshot?.settings?.model?.current
   if (!object(ref) || !identifier(ref.providerId) || !identifier(ref.modelId)) return null
-  return { providerId: ref.providerId, modelId: ref.modelId }
+  const out = { providerId: ref.providerId, modelId: ref.modelId }
+  const providerLabel = providerLabelFromSnapshot(snapshot, out)
+  if (providerLabel) out.providerLabel = providerLabel
+  return out
 }
 
 /** Relay ONLY a model runtime the native side itself published in a snapshot.

@@ -125,7 +125,10 @@ export class ZcodeCodegAgent {
           selectOptions.push({ value, name: model.label ?? model.modelId })
         }
         if (current && !seen.has(valueOf(current))) {
-          selectOptions.push({ value: valueOf(current), name: current.modelId })
+          const label = idValue(current.providerLabel)
+            ? `${current.providerLabel} / ${current.modelId}`
+            : current.modelId
+          selectOptions.push({ value: valueOf(current), name: label })
         }
         if (selectOptions.length > 0) {
           options.configOptions = [{

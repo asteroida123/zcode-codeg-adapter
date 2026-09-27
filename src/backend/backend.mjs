@@ -214,29 +214,46 @@ export class AppServerBackend {
     // missing config degrades to today's behavior instead of an empty list.
     const options = []
     const seen = new Set()
-    const push = (providerId, modelId, label) => {
+    // `label` is the row the ACP client shows; `providerName` is kept so callers
+    // can label a row the config catalog does not know (the snapshot's current
+    // model) with the same `Provider / Model` shape.
+    const push = (providerId, modelId, label, providerName) => {
       const value = `${providerId}/${modelId}`
       if (seen.has(value) || seen.size >= 128) return
       seen.add(value)
-      options.push({ providerId, modelId, ...(idValue(label) ? { label } : {}) })
+      options.push({
+        providerId, modelId,
+        ...(idValue(providerName) ? { providerName } : {}),
+        ...(idValue(label) ? { label } : {}),
+      })
     }
     const cfg = await this.loadZcodeConfig()
     for (const entry of selectableModelCatalog(cfg).slice(0, 128)) {
       // `Provider / Model`: the ACP client derives the picker's group header
       // from the display name's first "/" segment, so the separator is a
       // display contract, not cosmetics.
-      push(entry.providerId, entry.modelId, `${entry.providerName} / ${entry.modelId}`)
+      push(entry.providerId, entry.modelId, `${entry.providerName} / ${entry.modelId}`, entry.providerName)
     }
     const available = snapshot?.settings?.model?.available
     if (Array.isArray(available)) {
       for (const entry of available.slice(0, 64)) {
         if (!object(entry)) continue
         const ref = object(entry.ref) ? entry.ref : entry
-        if (idValue(ref.providerId) && idValue(ref.modelId)) push(ref.providerId, ref.modelId, entry.label)
+        if (!idValue(ref.providerId) || !idValue(ref.modelId)) continue
+        // The snapshot names both the model and its provider; use the same
+        // display shape as the catalog rows so the client's group header stays
+        // readable either way.
+        const modelLabel = idValue(entry.label) ? entry.label : ref.modelId
+        const providerLabel = idValue(entry.providerLabel) ? entry.providerLabel : null
+        push(ref.providerId, ref.modelId, providerLabel ? `${providerLabel} / ${modelLabel}` : modelLabel, providerLabel)
       }
     }
     const current = modelReferenceFromSnapshot(snapshot)
-    if (current) push(current.providerId, current.modelId)
+    if (current) {
+      const providerLabel = idValue(current.providerLabel) ? current.providerLabel : null
+      push(current.providerId, current.modelId,
+        providerLabel ? `${providerLabel} / ${current.modelId}` : null, providerLabel)
+    }
     return options
   }
 

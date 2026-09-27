@@ -433,6 +433,19 @@ test('ACP: the mode and model selectors are advertised and applied natively', as
   }
 })
 
+test('ACP: snapshot-sourced model rows name their provider too', async t => {
+  const { request, cwd } = await start(t)
+  const created = await request('session/new', { cwd, mcpServers: [] })
+  const modelOption = created.result.configOptions?.find(option => option.id === 'model')
+  const byValue = Object.fromEntries(modelOption.options.map(o => [o.value, o.name]))
+  // This fixture has no desktop config catalog, so both rows come from the
+  // native snapshot's available list — which names the provider. They must use
+  // the same `Provider / Model` display shape as the catalog rows, or the
+  // client's group header falls back to the raw provider id.
+  assert.equal(byValue['builtin-x/fake-model'], 'Fake Provider / Fake Model')
+  assert.equal(byValue['builtin-x/fake-mini'], 'Fake Provider / Fake Mini')
+})
+
 test('ACP: the reasoning-effort selector mirrors the native thought levels', async t => {
   const { request, cwd } = await start(t)
   const created = await request('session/new', { cwd, mcpServers: [] })

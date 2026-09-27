@@ -160,8 +160,8 @@ async function handle(frame) {
         model: {
           current: model,
           available: [
-            { ref: { providerId: 'builtin-x', modelId: 'fake-model' }, label: 'Fake Model' },
-            { ref: { providerId: 'builtin-x', modelId: 'fake-mini' }, label: 'Fake Mini' },
+            { ref: { providerId: 'builtin-x', modelId: 'fake-model' }, label: 'Fake Model', providerLabel: 'Fake Provider' },
+            { ref: { providerId: 'builtin-x', modelId: 'fake-mini' }, label: 'Fake Mini', providerLabel: 'Fake Provider' },
           ],
         },
         mode: { current: sessions[params.sessionId].mode ?? 'plan' },
