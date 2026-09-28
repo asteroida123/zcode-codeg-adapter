@@ -23,7 +23,7 @@ Codeg ── ACP / stdio ── zcode-codeg-acp（本仓库：会话协调/事�
 
 ### 模型目录与切换（双代协议）
 
-会话快照的可用模型列表在真机上只含当前模型；完整目录在 ZCode 桌面配置 `~/.zcode/v2/config.json` 的 provider 表。适配器合并两者，模型选择器可列出全部可用模型。切换协议按后端能力探测自动选择：
+会话快照的可用模型列表在真机上只含当前模型；完整目录来自 ZCode 桌面当前使用的两个 provider 存储——个人 provider `~/.zcode/v2/provider_config.json` 与内置目录 `zcode-builtin.json`（应用包内 + 按版本/CDN 刷新的 `~/.zcode/v2/runtime/provider/<platform>/<appVersion>/<endpoint>/` 缓存，取 revision 最高者）。适配器按桌面端解析器的合并规则复现目录（模板配置打底、个人条目逐字段覆盖、`builtinModelIds ∪ personalModelIds` 按 `modelOrder` 排序、账号 provider 需有凭据记录），再与会话快照合并，模型选择器即可列出与桌面一致的可用模型。`~/.zcode/v2/config.json` 的 provider 表是旧版单文件格式（桌面仅做一次性迁移导入），只在两个新存储都读不到时作为回退。切换协议按后端能力探测自动选择：
 
 - **V4 代后端**：`workspace/updateProviderRegistry` 推送 + `session/setModel` 带 `runtimeModel` overlay（第三方 provider 密钥走 inline 联合体；builtin 走自身 OAuth，绝不内联）
 - **0.16.5**：无 registry RPC；`setModel` 的 model ref 必须带 `options.reasoningLevel`。跨 provider 切换受后端 Provider Registry 限制（干净报错，会话不倒）——ZCode 后端升级后 V4 路径自动启用

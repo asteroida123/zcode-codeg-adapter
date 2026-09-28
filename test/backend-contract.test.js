@@ -460,3 +460,23 @@ test('Diagnostics: context counts reverse calls without exposing unknown names',
   assert.equal(context.transport.reverseRequests, 2)
   assert.ok(!JSON.stringify(context).includes('SECRET'))
 })
+
+test('Backend: the model catalog comes from the live stores when present', async t => {
+  const legacy = { provider: { 'builtin:legacy': { name: 'Legacy', enabled: true, options: { apiKey: 'k' }, models: { 'legacy-model': {} } } } }
+  const live = {
+    catalog: [{ providerId: 'live-provider', providerName: 'Live Provider', apiKey: 'k', models: [{ modelId: 'live-model' }] }],
+    source: { personal: true, builtinRevision: 31 },
+  }
+  const withLive = await fixture(t, '', true, { zcodeConfig: async () => legacy, providerCatalog: async () => live })
+  const sessionId = await withLive.client.open(withLive.cwd, { mcpServers: [] })
+  const values = (await withLive.client.modelOptions(sessionId)).map(option => `${option.providerId}/${option.modelId}`)
+  assert.deepEqual(values.slice(0, 1), ['live-provider/live-model'])
+  assert.ok(!values.some(value => value.includes('legacy')), 'the frozen legacy table must not be mixed in')
+
+  // No readable live store: the legacy provider table stays the fallback
+  // rather than leaving the selector empty.
+  const withoutLive = await fixture(t, '', true, { zcodeConfig: async () => legacy, providerCatalog: async () => null })
+  const fallbackSession = await withoutLive.client.open(withoutLive.cwd, { mcpServers: [] })
+  const fallback = (await withoutLive.client.modelOptions(fallbackSession)).map(option => `${option.providerId}/${option.modelId}`)
+  assert.ok(fallback.includes('builtin:legacy/legacy-model'), JSON.stringify(fallback))
+})

@@ -7,11 +7,22 @@ import { modelReferenceFromSnapshot, modelRuntimeFromSnapshot, rebindOriginalMod
 import {
   buildProviderRegistry, buildRuntimeModel, readZcodeConfig, selectableModelCatalog,
 } from './zcode-config.mjs'
+import { loadLiveProviderCatalog } from './provider-store.mjs'
 import { restoreWarningIndicator } from './diagnostics.mjs'
 
 export const PROFILE = 'app-server-cli-0.16.5-candidate'
 export const EXPECTED_CLI = '0.16.5'
 const idValue = value => typeof value === 'string' && value.length > 0 && value.length <= 512
+
+/** Mark a failure that provably never reached the native turn loop, so the
+ * caller may recover the backend and replay the same prompt without risking
+ * duplicated work. Deliberately a plain property: it never rides the wire and
+ * never reaches `safeDetails`. Module-level (not a private method) because the
+ * send path is exercised on duck-typed subjects in the offline tests. */
+function undispatched(error) {
+  if (error !== null && typeof error === 'object') error.notDispatched = true
+  return error
+}
 
 /** Deduplication key for a native permission request. Only a request that
  * names both a session and a tool call can be recognized as a re-send; the
@@ -71,6 +82,13 @@ export class AppServerBackend {
     // ZCode 桌面配置源（完整模型目录 / provider registry）。可注入覆盖供
     // 测试；默认读 ~/.zcode/v2/config.json，读失败优雅回退快照目录。
     this.loadZcodeConfig = typeof options.zcodeConfig === 'function' ? options.zcodeConfig : readZcodeConfig
+    // Live model catalog for the picker. The desktop stopped writing the
+    // legacy provider table into ~/.zcode/v2/config.json, so that table is a
+    // frozen snapshot; the current stores are provider_config.json + the
+    // refreshed builtin release. Null (unreadable stores) keeps the legacy
+    // path, which is stale but better than an empty selector.
+    this.loadProviderCatalog = typeof options.providerCatalog === 'function'
+      ? options.providerCatalog : loadLiveProviderCatalog
     // Provider-registry capability, probed per backend connection: V4-era
     // backends expose workspace/updateProviderRegistry (third-party model
     // switching needs the push + a runtimeModel overlay); 0.16.5 answers
@@ -89,8 +107,26 @@ export class AppServerBackend {
     this.rpc = new PrivateRpc({ ...options,
       onNotification: (method, params) => this.notification(method, params),
       onRequest: (method, params) => this.reverseRequest(method, params),
-      onFault: error => this.abortTurns(error),
+      onFault: error => {
+        this.#noteTransportFault(error)
+        this.abortTurns(error)
+      },
     })
+  }
+
+  /** One stderr line per backend on the first transport fault. stdout is the
+   * protocol; stderr is what a client keeps as bounded evidence, and without
+   * this the only trace of a dead native process was an opaque code on the
+   * next prompt. Carries a code, never a path or a session id. */
+  #noteTransportFault(error) {
+    this.transportFault = typeof error?.code === 'string' ? error.code : 'E_UNKNOWN'
+    if (this.transportFaultLogged) return
+    this.transportFaultLogged = true
+    try {
+      process.stderr.write(`[zcode-codeg-acp] native backend transport fault: ${this.transportFault}\n`)
+    } catch {
+      // A closed stderr must not turn a fault into a crash.
+    }
   }
 
   async open(cwd, { sessionId, mode = 'build', mcpServers = [] } = {}) {
@@ -232,12 +268,25 @@ export class AppServerBackend {
         ...(idValue(label) ? { label } : {}),
       })
     }
-    const cfg = await this.loadZcodeConfig()
-    for (const entry of selectableModelCatalog(cfg).slice(0, 128)) {
-      // `Provider / Model`: the ACP client derives the picker's group header
-      // from the display name's first "/" segment, so the separator is a
-      // display contract, not cosmetics.
-      push(entry.providerId, entry.modelId, `${entry.providerName} / ${entry.modelId}`, entry.providerName)
+    // Catalog source: the desktop's live stores first (personal
+    // provider_config.json + the refreshed builtin release); the legacy
+    // provider table only when neither is readable, because it stopped being
+    // written and freezes the list at whatever it held then.
+    const live = await this.loadProviderCatalog().catch(() => null)
+    if (live?.catalog?.length) {
+      for (const provider of live.catalog.slice(0, 64)) {
+        for (const model of provider.models.slice(0, 128)) {
+          // `Provider / Model`: the ACP client derives the picker's group
+          // header from the display name's first "/" segment, so the separator
+          // is a display contract, not cosmetics.
+          push(provider.providerId, model.modelId, `${provider.providerName} / ${model.modelId}`, provider.providerName)
+        }
+      }
+    } else {
+      const cfg = await this.loadZcodeConfig()
+      for (const entry of selectableModelCatalog(cfg).slice(0, 128)) {
+        push(entry.providerId, entry.modelId, `${entry.providerName} / ${entry.modelId}`, entry.providerName)
+      }
     }
     const available = snapshot?.settings?.model?.available
     if (Array.isArray(available)) {
@@ -401,7 +450,10 @@ export class AppServerBackend {
   prompt(id, content, { timeoutMs = 30000, cancelOnStream = false, cancelTimeoutMs = 3000, closeOnCancelTimeout = true, runtimeModel = null, onStream = null, onToolEvent = null } = {}) {
     const state = this.state(id)
     if (state.active) return Promise.reject(new ProbeError('E_BUSY'))
-    if (this.rpc.failure || this.rpc.closing) return Promise.reject(new ProbeError('E_CLOSED'))
+    // The transport is already terminal: nothing was written to it. Marked so
+    // the layer above knows the failure is safe to replay after a recovery -
+    // an E_CLOSED raised later (mid-turn) carries no such promise.
+    if (this.rpc.failure || this.rpc.closing) return Promise.reject(undispatched(new ProbeError('E_CLOSED')))
     const params = { sessionId: id, content }
     // Native send schema accepts an explicit runtimeModel descriptor which the
     // backend applies before guarding. Only an object passes through; semantic
@@ -439,7 +491,13 @@ export class AppServerBackend {
       }, timeoutMs)
       this.rpc.request('session/send', params).then(result => {
         if (turn.settled) return
-        if (result?.accepted !== true) { turn.finish(new ProbeError('E_SEND_REJECTED')); void this.close(); return }
+        if (result?.accepted !== true) {
+          // The native refused to start the turn: nothing ran, so a recovery
+          // may replay this prompt.
+          turn.finish(undispatched(new ProbeError('E_SEND_REJECTED')))
+          void this.close()
+          return
+        }
         turn.accepted = true
         if (turn.cancelOnStream && turn.streams > 0) this.cancel(id)
         this.complete(turn)
@@ -455,7 +513,12 @@ export class AppServerBackend {
           void this.close()
           return
         }
-        turn.finish(error)
+        // `session/send` rejected. The native ANSWERED (E_REMOTE) means the
+        // turn never began, so a recovery may replay this prompt; a transport
+        // fault while the send was in flight is ambiguous - the frame was
+        // written and the native may have started work - so it is left
+        // unmarked and the prompt is never replayed.
+        turn.finish(error?.code === 'E_REMOTE' ? undispatched(error) : error)
         void this.close()
       })
     })

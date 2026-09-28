@@ -59,6 +59,16 @@ const SESSION_FATAL_RECOVERED = 'E_SESSION_FATAL: the native session rejected th
   ' and if it fails again close this session and create a new one'
 const SESSION_FATAL_PERMANENT = 'E_SESSION_FATAL: the native session rejects every prompt with a frame error' +
   ' and cannot be recovered adapter-side; close this session and create a new one'
+/** The backend process went away on its own and the resumed session lost its
+ * replacement too: recycling cannot help this conversation any more. */
+const SESSION_BACKEND_LOST = 'E_SESSION_FATAL: the native session lost its backend process again right after' +
+  ' being resumed and cannot be recovered adapter-side; close this session and create a new one'
+
+/** Codes that mean the native BACKEND TRANSPORT is dead - its process exited,
+ * a pipe broke, or a frame was corrupted - as opposed to a turn-level refusal
+ * the native answered. A registered ACP session whose transport is dead fails
+ * every prompt with one of these until the backend is recycled. */
+const TRANSPORT_GONE = new Set(['E_CLOSED', 'E_EXIT', 'E_PIPE', 'E_FRAME', 'E_LIMIT'])
 
 function toolKindFor(toolName) {
   const name = typeof toolName === 'string' ? toolName.toLowerCase() : ''
@@ -320,32 +330,11 @@ export class ZcodeCodegAgent {
     if (!session) throw new Error('unknown session')
     // A session the native backend bricked with a frame error fails fast with
     // stable guidance; the prompt is not relayed back into a dead session.
-    if (session.fatal) throw sessionFatalError(SESSION_FATAL_PERMANENT)
+    if (session.fatal) throw sessionFatalError(session.fatalMessage ?? SESSION_FATAL_PERMANENT)
     const content = textFromPromptBlocks(params.prompt)
-    // Runtime supply order: what the native side published wins; otherwise a
-    // descriptor built from the adapter config and the native-published model
-    // reference. Without either, the send goes without one (relay-only).
-    const runtimeModel = session.backend.publishedRuntimeModel(params.sessionId) ??
-      session.configDescriptor ?? null
     let result
     try {
-      result = await session.backend.prompt(params.sessionId, content, {
-        timeoutMs: DEFAULT_PROMPT_TIMEOUT_MS,
-        cancelTimeoutMs: this.#cancelTimeoutMs,
-        runtimeModel,
-        onStream: text => {
-          void this.#conn.sessionUpdate({
-            sessionId: params.sessionId,
-            update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } },
-          }).catch(() => {})
-        },
-        onToolEvent: payload => {
-          const update = this.#toolCallUpdate(session, payload)
-          if (update) {
-            void this.#conn.sessionUpdate({ sessionId: params.sessionId, update }).catch(() => {})
-          }
-        },
-      })
+      result = await this.#sendPrompt(session, params.sessionId, content)
       // A completed prompt proves the session runs again; a future frame
       // rejection is a new event with its own recovery attempt.
       session.fatalCount = 0
@@ -368,6 +357,47 @@ export class ZcodeCodegAgent {
           recycledError.code = 'E_CANCEL_RECYCLED'
           throw recycledError
         }
+      }
+      // The native backend process is gone (exit, broken pipe, a corrupted
+      // frame) while this ACP session stays registered. Without recovery every
+      // later prompt on the conversation fails instantly with an opaque code
+      // while the client keeps showing the session as usable - its own
+      // reconnect is the only way out. Recycle the process and resume the SAME
+      // native session instead: the conversation keeps its history, and a
+      // prompt that provably never reached the native turn loop is replayed
+      // once, because replaying it cannot duplicate work.
+      if (TRANSPORT_GONE.has(error?.code)) {
+        const recovered = await this.#recycle(params.sessionId, session).catch(() => false)
+        if (recovered && error.notDispatched === true) {
+          const fresh = this.#sessions.get(params.sessionId)
+          try {
+            const retried = await this.#sendPrompt(fresh, params.sessionId, content)
+            fresh.fatalCount = 0
+            return { stopReason: stopReasonFor(retried) }
+          } catch (retryError) {
+            // A resumed session that dies again on the same prompt is not
+            // recoverable adapter-side; say so once instead of recycling on
+            // every future prompt.
+            if (TRANSPORT_GONE.has(retryError?.code)) {
+              fresh.fatal = true
+              fresh.fatalMessage = SESSION_BACKEND_LOST
+              throw sessionFatalError(SESSION_BACKEND_LOST)
+            }
+            if (typeof retryError?.code === 'string' && retryError.code.startsWith('E_')) {
+              retryError.message = annotatedMessage(retryError)
+            }
+            throw retryError
+          }
+        }
+        if (recovered) {
+          // The session is usable again, but this turn's outcome is unknown:
+          // the frame was written before the transport died. Report the failure
+          // honestly and let the client decide whether to resend.
+          error.message = `${annotatedMessage(error)}: backend process recycled, native session resumed - send the message again`
+          throw error
+        }
+        error.message = `${annotatedMessage(error)}: the native session could not be resumed; start a new session`
+        throw error
       }
       // Bounded diagnostics ride on the wire so clients can classify native
       // failures without raw error text.
@@ -408,12 +438,39 @@ export class ZcodeCodegAgent {
     return update
   }
 
+  /** One native turn on this session's backend. Runtime supply order: what the
+   * native side published wins; otherwise a descriptor built from the adapter
+   * config and the native-published model reference. Without either, the send
+   * goes without one (relay-only). Shared by the first attempt and the retry
+   * after a backend recovery so both stream through the same connection paths.
+   */
+  #sendPrompt(session, sessionId, content) {
+    return session.backend.prompt(sessionId, content, {
+      timeoutMs: DEFAULT_PROMPT_TIMEOUT_MS,
+      cancelTimeoutMs: this.#cancelTimeoutMs,
+      runtimeModel: session.backend.publishedRuntimeModel(sessionId) ?? session.configDescriptor ?? null,
+      onStream: text => {
+        void this.#conn.sessionUpdate({
+          sessionId,
+          update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } },
+        }).catch(() => {})
+      },
+      onToolEvent: payload => {
+        const update = this.#toolCallUpdate(session, payload)
+        if (update) {
+          void this.#conn.sessionUpdate({ sessionId, update }).catch(() => {})
+        }
+      },
+    })
+  }
+
   async #recycle(sessionId, session) {
     try {
       const backend = this.#backendFactory(session.cwd, this.#conn)
       await backend.open(session.cwd, { sessionId })
       const fresh = { backend, sessionId, cwd: session.cwd, seenToolCallIds: new Set(),
-        fatalCount: session.fatalCount ?? 0 }
+        fatalCount: session.fatalCount ?? 0,
+        ...(session.fatalMessage ? { fatalMessage: session.fatalMessage } : {}) }
       this.#sessions.set(sessionId, fresh)
       // A recycled backend resumed the native session, so the restore guard
       // applies again: rebuild the descriptor supply for the next send.
@@ -438,6 +495,7 @@ export class ZcodeCodegAgent {
       if (recycled) return sessionFatalError(SESSION_FATAL_RECOVERED)
     }
     session.fatal = true
+    session.fatalMessage = SESSION_FATAL_PERMANENT
     return sessionFatalError(SESSION_FATAL_PERMANENT)
   }
 

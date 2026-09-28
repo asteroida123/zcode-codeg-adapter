@@ -47,6 +47,25 @@ resume 路径补传 `mcpServers`（协议 schema 明确接受）、会话建立�
 - `session/setModel` 裸 model ref → ModelProtocolError "Reasoning level is required"
 - `session/setModel` + `options.reasoningLevel`（registry 内模型）→ OK，read 回读一致
 - `provider/updateAccountConfig`（config.json 原样）→ Zod 拒绝（字段形状不符，需迁移后格式）
+- 模型目录来源（2026-09-28 源校准，桌面 3.14.3 / CLI 0.16.9）：`~/.zcode/v2/config.json`
+  的 `provider` 表是**旧版**单文件格式，桌面只把它当一次性迁移输入——它停止更新后，任何
+  继续读它的客户端都会把模型列表冻结在当时的快照（实测：目录里同时出现已下线的
+  `builtin:bigmodel-coding-plan` 与名为 `…-expires-on-0910` 的过期模型，而当前在用的
+  `new-provider-3/cline-pass/…` 等 provider 全部缺失）。当前目录 = 个人存储
+  `provider_config.json`（schemaVersion 1：`providerOrder` / `providerConfigRules.providerRules`
+  / `modelConfigRules.{providerModelRules,manualProviderModelRules}`）+ 内置目录
+  `zcode-builtin.json`（应用包 `Resources/config/provider/`，以及 CDN 刷新缓存
+  `~/.zcode/v2/runtime/provider/<platform>/<appVersion>/endpoint-<sha256(origin)[0:32]>/`；
+  revision 最高者胜，同 revision 时应用包版本胜）。合并规则（`src/backend/provider-store.mjs`）：
+  provider 条目 = 模板配置打底 + 个人条目逐字段覆盖；模型 = `builtinModelIds ∪ personalModelIds`
+  按 `modelOrder` 排序（显式顺序优先）；model 规则序列 = 内置
+  `modelRules → modelApiRules → providerSiteRules → templateModelRules → builtinProviderModelRules`
+  再接个人 `providerModelRules → manualProviderModelRules`，**后者覆盖前者**，`modelMatch` 为
+  锚定的大小写不敏感正则；可选性 = provider `enabled !== false` 且（`api-key`/`zhipu-coding-plan-api-key`
+  需 `access.apiKey`；`zhipu-account` 需 `credentials.json` 里存在 `account-provider:…:<providerId>:…`
+  凭据键）且至少一个模型 `enabled !== false`；账号族（`zai-family`/`bigmodel-family`）排在最前，
+  其余按 `providerOrder`。协议侧**没有**读取目录的方法（方法表仅有 `provider/updateAccountConfig`
+  与 `provider/testModelConnectivity`），所以目录只能由文件推导。
 - `provider/updateAccountConfig`（正确信封）→ 待实现：需 `@zcode/provider` 的 provider 序列化
 - `mcp/list` connect → 真实 spawn codeg-mcp：connected、toolCount=4、
   `protocolEra: "legacy"`；模型工具面确认出现 `mcp__codeg-mcp__delegate_to_agent`（直驱探针）

@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { spawn, spawnSync } from 'node:child_process'
-import { mkdtemp, readFile, rm, writeFile, access } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile, access } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createInterface } from 'node:readline'
 import { AppServerBackend } from '../src/backend/backend.mjs'
 import { ZcodeCodegAgent, permissionDelegator } from '../src/acp/server.mjs'
+import { loadLiveProviderCatalog } from '../src/backend/provider-store.mjs'
 
 const bin = fileURLToPath(new URL('../bin/zcode-codeg-acp.js', import.meta.url))
 const fake = fileURLToPath(new URL('./fake-zcode.cjs', import.meta.url))
@@ -521,4 +522,157 @@ test('ACP: session list mirrors the native store', async t => {
   assert.ok(ids.includes(created.result.sessionId))
   const entry = listed.result.sessions.find(session => session.sessionId === created.result.sessionId)
   assert.equal(entry.title, 'Synthetic session')
+})
+
+/** In-process agent over the real backend seam, with every backend instance
+ * recorded so a test can kill the native process and inspect the recycle. */
+async function agentWithBackends(t, { cwd, env, onSecondFactory } = {}) {
+  const backends = []
+  const conn = { sessionUpdate: async () => {}, requestPermission: async () => ({ outcome: { outcome: 'cancelled' } }) }
+  const factory = workingDir => {
+    if (backends.length > 0 && typeof onSecondFactory === 'function') {
+      const substitute = onSecondFactory(backends.length)
+      if (substitute) return substitute
+    }
+    const backend = new AppServerBackend({ command: process.execPath, args: [fake], cwd: workingDir, env, timeoutMs: 5000 })
+    backends.push(backend)
+    return backend
+  }
+  const agent = new ZcodeCodegAgent(conn, { backendFactory: factory })
+  t.after(async () => {
+    for (const backend of backends) await backend.close().catch(() => {})
+  })
+  return { agent, backends }
+}
+
+const FAKE_ENV_KEYS = ['PATH', 'Path', 'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT', 'TMP', 'TEMP']
+function isolatedEnv(dir, extra = {}) {
+  const env = { HOME: dir, USERPROFILE: dir, ...extra }
+  for (const key of FAKE_ENV_KEYS) if (process.env[key] !== undefined) env[key] = process.env[key]
+  return env
+}
+
+test('ACP: a backend that died between turns is recycled and the prompt replayed', async t => {
+  // Live report (2026-09-28): the native backend process went away while the
+  // ACP session stayed registered, so every following message failed in ~1ms
+  // with an opaque E_CLOSED and the conversation was unusable until a manual
+  // reconnect. The session must instead resume itself.
+  const dir = await mkdtemp(join(tmpdir(), 'zcode-acp-dead-'))
+  t.after(async () => { await rmTolerant(dir) })
+  const { agent, backends } = await agentWithBackends(t, { cwd: dir, env: isolatedEnv(dir) })
+  const { sessionId } = await agent.newSession({ cwd: dir, mcpServers: [] })
+  assert.equal(backends.length, 1)
+
+  backends[0].rpc.child.kill('SIGKILL')
+  await new Promise(resolve => setTimeout(resolve, 300))
+
+  const prompted = await agent.prompt({
+    sessionId, prompt: [{ type: 'text', text: 'Reply with exactly ZCODE_PROBE_abcdef. Do not use tools or access files.' }],
+  })
+  assert.equal(prompted.stopReason, 'end_turn', 'the replayed prompt must complete')
+  assert.equal(backends.length, 2, 'the prompt must run on a recycled backend')
+  assert.ok(backends[1].sessions.has(sessionId), 'the SAME native session is resumed')
+})
+
+test('ACP: a turn killed by transport loss is not replayed, and the session stays usable', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'zcode-acp-lost-'))
+  t.after(async () => { await rmTolerant(dir) })
+  const { agent, backends } = await agentWithBackends(t, { cwd: dir, env: isolatedEnv(dir) })
+  const { sessionId } = await agent.newSession({ cwd: dir, mcpServers: [] })
+
+  const pending = agent.prompt({ sessionId, prompt: [{ type: 'text', text: 'long response' }] })
+    .then(value => ({ ok: value }), error => error)
+  await new Promise(resolve => setTimeout(resolve, 150))
+  backends[0].rpc.child.kill('SIGKILL')
+  const outcome = await pending
+
+  // Outcome unknown: the prompt was written before the transport died, so it
+  // is reported as a failure - never silently re-run.
+  assert.match(String(outcome.message), /send the message again/)
+  assert.equal(backends.length, 2, 'the session is recycled so it stays usable')
+  const again = await agent.prompt({
+    sessionId, prompt: [{ type: 'text', text: 'Reply with exactly ZCODE_PROBE_abcdef. Do not use tools or access files.' }],
+  })
+  assert.equal(again.stopReason, 'end_turn')
+})
+
+test('ACP: a session that cannot be resumed reports it instead of pretending', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'zcode-acp-noresume-'))
+  t.after(async () => { await rmTolerant(dir) })
+  const { agent, backends } = await agentWithBackends(t, {
+    cwd: dir,
+    env: isolatedEnv(dir),
+    onSecondFactory: () => { throw new Error('spawn refused') },
+  })
+  const { sessionId } = await agent.newSession({ cwd: dir, mcpServers: [] })
+  backends[0].rpc.child.kill('SIGKILL')
+  await new Promise(resolve => setTimeout(resolve, 300))
+
+  const outcome = await agent.prompt({ sessionId, prompt: [{ type: 'text', text: 'hello' }] })
+    .then(value => ({ ok: value }), error => error)
+  assert.match(String(outcome.message), /could not be resumed/)
+})
+
+test('ACP: the model selector reads the desktop live stores, not the frozen legacy table', async t => {
+  // Field regression (2026-09-28): the picker listed the legacy
+  // ~/.zcode/v2/config.json provider table, which the desktop stopped writing
+  // - so it showed providers and models that no longer exist and missed every
+  // provider added since.
+  const dir = await mkdtemp(join(tmpdir(), 'zcode-acp-catalog-'))
+  t.after(async () => { await rmTolerant(dir) })
+  const v2 = join(dir, '.zcode', 'v2')
+  await mkdir(join(v2, 'runtime', 'provider', 'darwin-arm64', '3.14.3', 'endpoint-a'), { recursive: true })
+  await writeFile(join(v2, 'provider_config.json'), JSON.stringify({
+    schemaVersion: 1,
+    config: {
+      providerOrder: ['live-provider'],
+      providerConfigRules: {
+        providerRules: [{
+          providerId: 'live-provider', providerName: 'Live Provider',
+          config: { group: 'standard-personal', access: { type: 'api-key', apiKey: 'k' },
+            api: { type: 'anthropic-messages', baseUrl: 'https://live.example' },
+            personalModelIds: ['live-model'], modelOrder: ['live-model'] },
+        }],
+      },
+      modelConfigRules: { providerModelRules: [], manualProviderModelRules: [] },
+    },
+  }))
+  await writeFile(join(v2, 'credentials.json'), JSON.stringify({
+    'account-provider:coding-plan:account:live-account:account:1:api-key': 'enc:v1:x',
+  }))
+  await writeFile(join(v2, 'runtime', 'provider', 'darwin-arm64', '3.14.3', 'endpoint-a', 'zcode-builtin.json'), JSON.stringify({
+    schemaVersion: 1, revision: 31,
+    config: {
+      providerConfigRules: { templateRules: [], providerRules: [{
+        providerId: 'account:live-account', providerName: 'Live Account',
+        config: { group: 'bigmodel-family', builtinModelIds: ['account-model'],
+          access: { type: 'zhipu-account', mode: 'individual-coding-plan' }, api: { type: 'anthropic-messages' } },
+      }] },
+      modelConfigRules: { modelRules: [{ modelMatch: '.*', config: { enabled: true } }] },
+    },
+  }))
+  const legacy = join(dir, 'legacy-config.json')
+  await writeFile(legacy, JSON.stringify({
+    provider: { 'builtin:legacy': { name: 'Legacy', enabled: true, options: { apiKey: 'k' }, models: { 'legacy-model': {} } } },
+  }))
+
+  const agent = new ZcodeCodegAgent(
+    { sessionUpdate: async () => {}, requestPermission: async () => ({ outcome: { outcome: 'cancelled' } }) },
+    {
+      backendFactory: workingDir => new AppServerBackend({
+        command: process.execPath, args: [fake], cwd: workingDir, env: isolatedEnv(workingDir), timeoutMs: 5000,
+        zcodeConfig: async () => JSON.parse(await readFile(legacy, 'utf8')),
+        providerCatalog: () => loadLiveProviderCatalog({ home: dir, entry: fake }),
+      }),
+    })
+  const created = await agent.newSession({ cwd: dir, mcpServers: [] })
+  const modelOption = created.configOptions?.find(option => option.id === 'model')
+  const values = (modelOption?.options ?? []).map(option => option.value)
+  // The catalog rows come first; the fake CLI's own snapshot rows follow (the
+  // deliberate snapshot merge below them).
+  assert.deepEqual(values.slice(0, 2), ['account:live-account/account-model', 'live-provider/live-model'])
+  assert.ok(!values.some(value => value.includes('legacy')), 'the frozen legacy table must not leak in')
+  const labels = Object.fromEntries((modelOption?.options ?? []).map(option => [option.value, option.name]))
+  assert.equal(labels['live-provider/live-model'], 'Live Provider / live-model')
+  await agent.closeSession({ sessionId: created.sessionId })
 })

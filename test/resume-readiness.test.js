@@ -96,7 +96,11 @@ test('Resume: continued send relays only an explicit published runtime descripto
     return subject
   }
   const subject = build()
-  await assert.rejects(subject.prompt('s', 'hello', { runtimeModel: runtime }), hasCode('E_REMOTE'))
+  // A native refusal never reached the turn loop, so it is marked replayable.
+  await assert.rejects(subject.prompt('s', 'hello', { runtimeModel: runtime }), error => {
+    assert.equal(error.notDispatched, true)
+    return hasCode('E_REMOTE')(error)
+  })
   assert.equal(subject.captured.method, 'session/send')
   assert.deepEqual(subject.captured.params, { sessionId: 's', content: 'hello', runtimeModel: runtime })
   const invalid = build()
@@ -105,6 +109,15 @@ test('Resume: continued send relays only an explicit published runtime descripto
   const bare = build()
   await assert.rejects(bare.prompt('s', 'hello'), hasCode('E_REMOTE'))
   assert.deepEqual(bare.captured.params, { sessionId: 's', content: 'hello' })
+
+  // A TRANSPORT fault while the send was in flight is ambiguous: the frame was
+  // written, so the prompt must never be marked replayable.
+  const lost = build()
+  lost.rpc.request = () => Promise.reject(new ProbeError('E_EXIT'))
+  await assert.rejects(lost.prompt('s', 'hello'), error => {
+    assert.equal(error.notDispatched, undefined)
+    return hasCode('E_EXIT')(error)
+  })
 })
 
 test('Resume: baseline failure preserves first answer and restored history, without automatic rebind', async t => {
