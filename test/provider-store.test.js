@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   accountCredentialKeys, bundledBuiltinPath, effectiveModelConfig, hasAccountCredential,
-  loadLiveProviderCatalog, mergeProviderCatalog, pickBuiltinRelease, toLegacyProviderConfig,
+  loadLiveProviderCatalog, mergeProviderCatalog, pickBuiltinRelease,
 } from '../src/backend/provider-store.mjs'
 
 const builtinRelease = ({ revision = 30, providers = [], templates = [], modelRules = [], templateModelRules = [], builtinProviderModelRules = [] } = {}) => ({
@@ -224,16 +224,4 @@ test('model rules: a later rule wins and unknown kinds never match', () => {
   // A rule whose kind this module does not understand is inert, not a wildcard.
   assert.deepEqual(effectiveModelConfig([{ providerId: 'p', config: { enabled: false } }], { providerId: 'p', modelId: 'm' }),
     { enabled: true })
-})
-
-test('legacy projection: only key-bearing providers are projected, keys stay inline', () => {
-  const legacy = toLegacyProviderConfig([
-    { providerId: 'account:x', providerName: 'Account', account: true, models: [{ modelId: 'm' }] },
-    { providerId: 'p', providerName: 'P', apiKey: 'k', apiType: 'anthropic-messages', baseUrl: 'https://p.example',
-      models: [{ modelId: 'm', contextWindow: 1000 }] },
-  ])
-  assert.deepEqual(Object.keys(legacy.provider), ['p'])
-  assert.equal(legacy.provider.p.options.apiKey, 'k')
-  assert.equal(legacy.provider.p.options.baseURL, 'https://p.example')
-  assert.deepEqual(legacy.provider.p.models.m.limit, { context: 1000 })
 })

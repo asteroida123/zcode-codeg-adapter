@@ -72,6 +72,13 @@ resume 路径补传 `mcpServers`（协议 schema 明确接受）、会话建立�
 
 ## 后续工作项
 
+0. **registry/overlay 仍读旧表**（V4 后端才有影响）：`loadZcodeConfig`（喂给
+   `workspace/updateProviderRegistry` 与 `setModel` 的 runtimeModel overlay）仍读
+   `~/.zcode/v2/config.json`，所以 V4 后端上切换到"新存储里才有"的第三方 provider 依旧会
+   `provider_not_configured`。同一份新存储的连接方式见 `src/backend/provider-store.mjs`；
+   切换前需确认新存储的模型定义（`properties.contextWindow`、`optionSpecs.reasoningLevel`）
+   能补上旧表里的 `reasoning.variants`，否则 overlay 会把会话的思考档位重置成 apiFormat 默认值。
+   当前真机 CLI 0.16.9 无 registry RPC，此路径不生效。
 1. **跨 provider 切换解锁**：实现 `provider/updateAccountConfig` 推送
    （需按 `packages/services/src/model-provider/legacyZCodeConfigProviderReader.ts`
    的转换逻辑把 config.json 迁移到协议 provider 格式）。

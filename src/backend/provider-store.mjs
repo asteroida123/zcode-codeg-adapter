@@ -350,37 +350,3 @@ export async function loadLiveProviderCatalog({
   if (catalog.length === 0 && !personal && !builtin) return null
   return { catalog, source: { personal: Boolean(personal), builtinRevision: builtin?.revision ?? null } }
 }
-
-/** Legacy-shaped provider map (`{provider: {id: {name, kind, options, models}}}`)
- * for the provider-registry and runtimeModel-overlay builders, which are
- * written against that shape. Only providers with an inline key are projected:
- * account providers carry no key, and both builders invent one when handed a
- * custom-shaped entry. */
-export function toLegacyProviderConfig(catalog) {
-  const provider = {}
-  for (const entry of array(catalog)) {
-    if (entry.account) continue
-    const models = {}
-    for (const model of array(entry.models)) {
-      const definition = {}
-      if (Number.isSafeInteger(model.contextWindow) && model.contextWindow > 0) {
-        definition.limit = { context: model.contextWindow }
-      }
-      models[model.modelId] = definition
-    }
-    if (Object.keys(models).length === 0) continue
-    provider[entry.providerId] = {
-      name: entry.providerName,
-      enabled: true,
-      source: 'custom',
-      ...(entry.apiType === 'anthropic-messages' ? { kind: 'anthropic' } : {}),
-      ...(typeof entry.apiType === 'string' && entry.apiType.includes('openai') ? { kind: 'openai' } : {}),
-      options: {
-        ...(entry.baseUrl ? { baseURL: entry.baseUrl } : {}),
-        ...(entry.apiKey ? { apiKey: entry.apiKey } : {}),
-      },
-      models,
-    }
-  }
-  return { provider }
-}
